@@ -611,43 +611,116 @@ def invariant_headings(text: str) -> tuple[str, ...]:
     )
 
 
-def _is_link_reference_definition_start(line: str) -> bool:
+def _link_reference_remainder(line: str) -> str | None:
     leading = len(line) - len(line.lstrip(" "))
     if leading > 3:
-        return False
+        return None
 
     stripped = line[leading:]
     if not stripped.startswith("["):
-        return False
+        return None
 
     close = stripped.find("]:")
-    return close > 1
+    if close <= 1:
+        return None
+
+    return stripped[close + 2 :].strip()
+
+
+def _reference_title_line(line: str) -> bool:
+    return re.fullmatch(
+        r" {0,3}(?:\"[^\"]*\"|'[^']*'|\([^)]*\))[ \t]*",
+        line,
+    ) is not None
+
+
+def _reference_destination_line(line: str) -> tuple[bool, bool]:
+    """Return (valid destination, inline title present)."""
+    leading = len(line) - len(line.lstrip(" "))
+    if leading > 3:
+        return False, False
+
+    stripped = line[leading:].strip()
+    if not stripped:
+        return False, False
+
+    if stripped.startswith("<"):
+        close = stripped.find(">")
+        if close <= 1:
+            return False, False
+        destination = stripped[: close + 1]
+        rest = stripped[close + 1 :].strip()
+        if "<" in destination[1:-1] or ">" in destination[1:-1]:
+            return False, False
+    else:
+        match = re.match(r"(?P<dest>\S+)(?P<rest>.*)$", stripped)
+        if match is None:
+            return False, False
+        destination = match.group("dest")
+        rest = match.group("rest").strip()
+        if destination.startswith(("\"", "'", "(")):
+            return False, False
+
+    if not rest:
+        return True, False
+
+    return True, _reference_title_line(rest)
+
+
+def _reference_definition_end(
+    lines: tuple[str, ...], start: int
+) -> int | None:
+    """Return the first line after a complete link-reference definition."""
+    remainder = _link_reference_remainder(lines[start])
+    if remainder is None:
+        return None
+
+    cursor = start + 1
+
+    if remainder:
+        valid, has_title = _reference_destination_line(remainder)
+        if not valid:
+            return None
+        if has_title:
+            return cursor
+    else:
+        if cursor >= len(lines):
+            return None
+        valid, has_title = _reference_destination_line(lines[cursor])
+        if not valid:
+            return None
+        cursor += 1
+        if has_title:
+            return cursor
+
+    if cursor < len(lines) and _reference_title_line(lines[cursor]):
+        cursor += 1
+
+    return cursor
 
 
 def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
-    """Approximate rendered prose by excluding link-reference metadata."""
+    """Approximate rendered prose while excluding link-reference metadata."""
     lines = markdown_visible_lines(text)
     rendered: list[str] = []
-    hide_reference_title = False
+    paragraph_open = False
+    index = 0
 
-    for line in lines:
-        if _is_link_reference_definition_start(line):
-            hide_reference_title = True
-            continue
+    while index < len(lines):
+        line = lines[index]
 
-        if hide_reference_title:
-            if re.fullmatch(
-                r" {0,3}(?:\"[^\"]*\"|'[^']*'|\([^)]*\))[ \t]*",
-                line,
-            ):
-                hide_reference_title = False
+        if not paragraph_open:
+            definition_end = _reference_definition_end(lines, index)
+            if definition_end is not None:
+                index = definition_end
+                paragraph_open = False
                 continue
-            hide_reference_title = False
 
         rendered.append(line)
+        paragraph_open = _paragraph_state_after(line, paragraph_open)
+        index += 1
 
     return tuple(rendered)
-
 
 def markdown_rendered_prose_text(text: str) -> str:
     return "\n".join(markdown_rendered_prose_lines(text))

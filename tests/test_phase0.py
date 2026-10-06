@@ -407,6 +407,32 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_multiline_reference_destination_is_hidden_metadata(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n[hidden]:\n"
+            '  /url "machine-checkable Phase 0 validator"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_reference_looking_line_inside_paragraph_remains_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '[note]: / "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_standalone_equals_marker_starts_paragraph(self) -> None:
         texts = contract_texts()
         texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
