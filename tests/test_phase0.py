@@ -504,6 +504,85 @@ class Phase0ContractTests(unittest.TestCase):
         )
         self.assertEqual([], module.validate_texts(texts))
 
+    def test_backslash_space_does_not_escape_reference_destination(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[hidden]: /foo\\ bar "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_unescaped_opening_bracket_invalidates_reference_label(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[foo[bar]: /url "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_inline_reference_title_requires_whitespace_after_destination(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[hidden]: <url>"machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_multiline_reference_title_is_hidden_metadata(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n[hidden]: /url\n"
+            '"machine-checkable Phase 0 validator\n'
+            'continued"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_ordered_list_stops_multiline_reference_destination(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n[hidden]:\n"
+            '1. "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_type7_angle_tag_can_be_multiline_reference_destination(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n[hidden]:\n"
+            "<url>\n"
+            '"machine-checkable Phase 0 validator"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
     def test_standalone_equals_marker_starts_paragraph(self) -> None:
         texts = contract_texts()
         texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(

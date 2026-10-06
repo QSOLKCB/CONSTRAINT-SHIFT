@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import string
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,10 +71,10 @@ INVARIANT_HEADING_RE = re.compile(r"^I\d+ — .+$")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
-SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \\t]*$")
+SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 LIST_ITEM_RE = re.compile(
-    r"^ {0,3}(?:(?P<bullet>[-+*])|(?P<number>\\d{1,9})[.)])"
-    r"(?P<spacing>[ \\t]+)"
+    r"^ {0,3}(?:(?P<bullet>[-+*])|(?P<number>\d{1,9})[.)])"
+    r"(?P<spacing>[ \t]+)"
 )
 THEMATIC_BREAK_RE = re.compile(
     r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
@@ -625,47 +626,80 @@ def _link_reference_remainder(line: str) -> str | None:
 
     cursor = 1
     while cursor + 1 < len(stripped):
+        char = stripped[cursor]
+
+        if char == "[" and not _is_escaped(stripped, cursor):
+            return None
+
         if (
-            stripped[cursor] == "]"
+            char == "]"
             and stripped[cursor + 1] == ":"
             and not _is_escaped(stripped, cursor)
         ):
             if cursor <= 1:
                 return None
             return stripped[cursor + 2 :].strip()
+
         cursor += 1
 
     return None
 
 
-def _reference_title_line(line: str) -> bool:
-    leading = len(line) - len(line.lstrip(" "))
+def _reference_title_end(
+    lines: tuple[str, ...], start: int
+) -> int | None:
+    """Return first line after a valid possibly-multiline link title."""
+    if start >= len(lines):
+        return None
+
+    first = lines[start]
+    leading = len(first) - len(first.lstrip(" "))
     if leading > 3:
-        return False
+        return None
 
-    stripped = line[leading:].strip()
-    if len(stripped) < 2:
-        return False
+    current = first[leading:].strip()
+    if not current:
+        return None
 
-    opener = stripped[0]
+    opener = current[0]
     closer = {
         '"': '"',
         "'": "'",
         "(": ")",
     }.get(opener)
     if closer is None:
-        return False
+        return None
 
+    line_index = start
     cursor = 1
-    while cursor < len(stripped):
-        char = stripped[cursor]
-        if char == closer and not _is_escaped(stripped, cursor):
-            return not stripped[cursor + 1 :].strip()
-        if opener == "(" and char == "(" and not _is_escaped(stripped, cursor):
-            return False
-        cursor += 1
 
-    return False
+    while True:
+        while cursor < len(current):
+            char = current[cursor]
+            if char == closer and not _is_escaped(current, cursor):
+                if current[cursor + 1 :].strip():
+                    return None
+                return line_index + 1
+            if (
+                opener == "("
+                and char == "("
+                and not _is_escaped(current, cursor)
+            ):
+                return None
+            cursor += 1
+
+        line_index += 1
+        if line_index >= len(lines):
+            return None
+
+        current = lines[line_index]
+        if not current.strip():
+            return None
+        cursor = 0
+
+
+def _reference_title_line(line: str) -> bool:
+    return _reference_title_end((line,), 0) == 1
 
 
 def _split_reference_destination(text: str) -> tuple[bool, str]:
@@ -678,9 +712,19 @@ def _split_reference_destination(text: str) -> tuple[bool, str]:
         while cursor < len(text):
             char = text[cursor]
             if char == ">" and not _is_escaped(text, cursor):
-                return True, text[cursor + 1 :].strip()
+                tail = text[cursor + 1 :]
+                if tail and tail[0] not in " \t":
+                    return False, ""
+                return True, tail.strip()
             if char == "<" and not _is_escaped(text, cursor):
                 return False, ""
+            if (
+                char == "\\"
+                and cursor + 1 < len(text)
+                and text[cursor + 1] in string.punctuation
+            ):
+                cursor += 2
+                continue
             cursor += 1
         return False, ""
 
@@ -690,10 +734,13 @@ def _split_reference_destination(text: str) -> tuple[bool, str]:
         char = text[cursor]
 
         if char == "\\" and cursor + 1 < len(text):
-            cursor += 2
+            if text[cursor + 1] in string.punctuation:
+                cursor += 2
+                continue
+            cursor += 1
             continue
 
-        if char in " 	":
+        if char in " \t":
             break
 
         if char == "(":
@@ -712,7 +759,7 @@ def _split_reference_destination(text: str) -> tuple[bool, str]:
 
 
 def _reference_destination_line(line: str) -> tuple[bool, bool]:
-    """Return (valid destination, inline title present)."""
+    """Return (valid destination, complete inline title present)."""
     leading = len(line) - len(line.lstrip(" "))
     if leading > 3:
         return False, False
@@ -753,7 +800,8 @@ def _line_starts_reference_block(line: str) -> bool:
     if _list_match(line) is not None:
         return True
 
-    if _raw_html_block_start(line, allow_generic=True) is not None:
+    # Type-7 generic tags cannot interrupt a paragraph/reference definition.
+    if _raw_html_block_start(line, allow_generic=False) is not None:
         return True
 
     if line.startswith("    "):
@@ -790,8 +838,10 @@ def _reference_definition_end(
         if has_title:
             return cursor
 
-    if cursor < len(lines) and _reference_title_line(lines[cursor]):
-        cursor += 1
+    if cursor < len(lines):
+        title_end = _reference_title_end(lines, cursor)
+        if title_end is not None:
+            return title_end
 
     return cursor
 
