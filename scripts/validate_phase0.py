@@ -469,6 +469,12 @@ def _list_item_starts_paragraph(line: str) -> bool:
     if _reference_definition_end((content,), 0) is not None:
         return False
 
+    # CommonMark list interruption uses ASCII space/tab blankness, but
+    # a content line made only of Unicode whitespace does not contribute
+    # rendered paragraph text for lazy-continuation purposes.
+    if not content.strip():
+        return False
+
     return _line_starts_paragraph_block(content)
 
 def _fence_open_details(
