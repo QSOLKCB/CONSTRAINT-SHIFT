@@ -726,6 +726,43 @@ class Phase0ContractTests(unittest.TestCase):
         )
         self.assertEqual([], module.validate_texts(texts))
 
+    def test_nested_list_indented_code_does_not_count_as_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n- # item\n"
+            "      machine-checkable Phase 0 validator\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_newline_padding_does_not_satisfy_artifact_size(self) -> None:
+        texts = contract_texts()
+        texts["METHODOLOGY.md"] = "x" + "\n" * 79
+        errors = module.validate_texts(texts)
+        self.assertIn(
+            "required artifact is suspiciously small: METHODOLOGY.md",
+            errors,
+        )
+
+    def test_nbsp_preserves_list_continuation_state(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n- item\n"
+            "  \u00a0\n"
+            "    machine-checkable Phase 0 validator\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"

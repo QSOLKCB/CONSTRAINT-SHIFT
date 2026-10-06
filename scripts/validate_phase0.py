@@ -169,6 +169,18 @@ def _list_content_column(line: str) -> int | None:
     return _column_at(line, match.end())
 
 
+def _list_item_starts_paragraph(line: str) -> bool:
+    match = _list_match(line)
+    if match is None:
+        return False
+
+    content = line[match.end() :]
+    if not content.strip(" \t"):
+        return False
+
+    return _line_starts_paragraph_block(content)
+
+
 def _fence_open(
     line: str, paragraph_open: bool = False
 ) -> tuple[str, int] | None:
@@ -881,7 +893,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
     while index < len(lines):
         line = lines[index]
 
-        if not line.strip():
+        if not line.strip(" \t"):
             rendered.append(line)
             paragraph_open = False
             list_content_column = None
@@ -894,8 +906,21 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             list_content_column is not None
             and leading_columns >= list_content_column
         ):
+            relative_indent = leading_columns - list_content_column
+
+            if not paragraph_open and relative_indent >= 4:
+                index += 1
+                continue
+
             rendered.append(line)
-            paragraph_open = True
+
+            if paragraph_open:
+                paragraph_open = True
+            else:
+                paragraph_open = _line_starts_paragraph_block(
+                    line.lstrip(" \t")
+                )
+
             index += 1
             continue
 
@@ -906,7 +931,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             index += 1
             while index < len(lines):
                 continuation = lines[index]
-                if not continuation.strip():
+                if not continuation.strip(" \t"):
                     index += 1
                     continue
                 if _leading_columns(continuation) >= 4:
@@ -929,7 +954,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
         content_column = _list_content_column(line)
         if content_column is not None:
             list_content_column = content_column
-            paragraph_open = False
+            paragraph_open = _list_item_starts_paragraph(line)
         else:
             paragraph_open = _paragraph_state_after(line, paragraph_open)
 
@@ -1011,7 +1036,8 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
         errors.append("README must explicitly separate thesis from established fact")
 
     for path, text in texts.items():
-        if len(text.strip(" \t")) < 80:
+        content_size = sum(1 for char in text if not char.isspace())
+        if content_size < 80:
             errors.append(f"required artifact is suspiciously small: {path}")
 
     return errors
