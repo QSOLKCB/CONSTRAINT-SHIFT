@@ -994,9 +994,17 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
             continue
 
         records.append((visible_line, paragraph_open))
-        paragraph_open = _paragraph_state_after(
-            visible_line, paragraph_open
+        list_content_column = _list_content_column(
+            visible_line, paragraph_open=paragraph_open
         )
+        if list_content_column is not None:
+            paragraph_open = _list_item_starts_paragraph(
+                visible_line
+            )
+        else:
+            paragraph_open = _paragraph_state_after(
+                visible_line, paragraph_open
+            )
         index += 1
 
     return tuple(records)
