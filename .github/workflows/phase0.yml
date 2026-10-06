@@ -1,0 +1,27 @@
+name: Phase 0 Contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate research contract
+        run: python3 scripts/validate_phase0.py
+
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v
