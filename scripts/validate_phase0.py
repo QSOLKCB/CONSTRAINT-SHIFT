@@ -531,6 +531,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
                 fence_char = marker[0]
                 fence_len = len(marker)
                 fence_base_indent = base_indent
+                visible_lines.append("")
                 paragraph_open = False
                 continue
 
@@ -549,6 +550,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
             fence_char = marker[0]
             fence_len = len(marker)
             fence_base_indent = base_indent
+            visible_lines.append("")
             paragraph_open = False
             continue
 
@@ -560,6 +562,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
             if not _raw_html_block_ends(visible_line, mode, terminator):
                 raw_html_mode = mode
                 raw_html_terminator = terminator
+            visible_lines.append("")
             paragraph_open = False
             continue
 
@@ -620,18 +623,92 @@ def _link_reference_remainder(line: str) -> str | None:
     if not stripped.startswith("["):
         return None
 
-    close = stripped.find("]:")
-    if close <= 1:
-        return None
+    cursor = 1
+    while cursor + 1 < len(stripped):
+        if (
+            stripped[cursor] == "]"
+            and stripped[cursor + 1] == ":"
+            and not _is_escaped(stripped, cursor)
+        ):
+            if cursor <= 1:
+                return None
+            return stripped[cursor + 2 :].strip()
+        cursor += 1
 
-    return stripped[close + 2 :].strip()
+    return None
 
 
 def _reference_title_line(line: str) -> bool:
-    return re.fullmatch(
-        r" {0,3}(?:\"[^\"]*\"|'[^']*'|\([^)]*\))[ \t]*",
-        line,
-    ) is not None
+    leading = len(line) - len(line.lstrip(" "))
+    if leading > 3:
+        return False
+
+    stripped = line[leading:].strip()
+    if len(stripped) < 2:
+        return False
+
+    opener = stripped[0]
+    closer = {
+        '"': '"',
+        "'": "'",
+        "(": ")",
+    }.get(opener)
+    if closer is None:
+        return False
+
+    cursor = 1
+    while cursor < len(stripped):
+        char = stripped[cursor]
+        if char == closer and not _is_escaped(stripped, cursor):
+            return not stripped[cursor + 1 :].strip()
+        if opener == "(" and char == "(" and not _is_escaped(stripped, cursor):
+            return False
+        cursor += 1
+
+    return False
+
+
+def _split_reference_destination(text: str) -> tuple[bool, str]:
+    """Return (valid destination, remaining title text)."""
+    if not text:
+        return False, ""
+
+    if text.startswith("<"):
+        cursor = 1
+        while cursor < len(text):
+            char = text[cursor]
+            if char == ">" and not _is_escaped(text, cursor):
+                return True, text[cursor + 1 :].strip()
+            if char == "<" and not _is_escaped(text, cursor):
+                return False, ""
+            cursor += 1
+        return False, ""
+
+    depth = 0
+    cursor = 0
+    while cursor < len(text):
+        char = text[cursor]
+
+        if char == "\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
+
+        if char in " 	":
+            break
+
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return False, ""
+            depth -= 1
+
+        cursor += 1
+
+    if cursor == 0 or depth != 0:
+        return False, ""
+
+    return True, text[cursor:].strip()
 
 
 def _reference_destination_line(line: str) -> tuple[bool, bool]:
@@ -644,27 +721,45 @@ def _reference_destination_line(line: str) -> tuple[bool, bool]:
     if not stripped:
         return False, False
 
-    if stripped.startswith("<"):
-        close = stripped.find(">")
-        if close <= 1:
-            return False, False
-        destination = stripped[: close + 1]
-        rest = stripped[close + 1 :].strip()
-        if "<" in destination[1:-1] or ">" in destination[1:-1]:
-            return False, False
-    else:
-        match = re.match(r"(?P<dest>\S+)(?P<rest>.*)$", stripped)
-        if match is None:
-            return False, False
-        destination = match.group("dest")
-        rest = match.group("rest").strip()
-        if destination.startswith(("\"", "'", "(")):
-            return False, False
+    valid, rest = _split_reference_destination(stripped)
+    if not valid:
+        return False, False
 
     if not rest:
         return True, False
 
-    return True, _reference_title_line(rest)
+    if not _reference_title_line(rest):
+        return False, False
+
+    return True, True
+
+
+def _line_starts_reference_block(line: str) -> bool:
+    if not line.strip():
+        return True
+
+    if ATX_HEADING_RE.match(line):
+        return True
+
+    if THEMATIC_BREAK_RE.match(line):
+        return True
+
+    if _fence_open(line, paragraph_open=False) is not None:
+        return True
+
+    if re.match(r"^ {0,3}>", line):
+        return True
+
+    if _list_match(line) is not None:
+        return True
+
+    if _raw_html_block_start(line, allow_generic=True) is not None:
+        return True
+
+    if line.startswith("    "):
+        return True
+
+    return False
 
 
 def _reference_definition_end(
@@ -686,6 +781,8 @@ def _reference_definition_end(
     else:
         if cursor >= len(lines):
             return None
+        if _line_starts_reference_block(lines[cursor]):
+            return None
         valid, has_title = _reference_destination_line(lines[cursor])
         if not valid:
             return None
@@ -697,7 +794,6 @@ def _reference_definition_end(
         cursor += 1
 
     return cursor
-
 
 def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
     """Approximate rendered prose while excluding link-reference metadata."""
