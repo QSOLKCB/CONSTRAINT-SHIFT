@@ -48,9 +48,28 @@ TERMS = (
     "Research Contract",
 )
 
-INVARIANT_PREFIXES = tuple(f"I{i} —" for i in range(1, 15))
+INVARIANTS = (
+    "I1 — No conclusion by model assertion",
+    "I2 — Equivalent-task comparisons",
+    "I3 — Preserve failures",
+    "I4 — Record intervention",
+    "I5 — Record environment",
+    "I6 — Separate generation from verification",
+    "I7 — Observable contracts before equivalence claims",
+    "I8 — No predetermined language winner",
+    "I9 — Negative results are publishable results",
+    "I10 — Social experiments control the artifact",
+    "I11 — Human-subject safeguards",
+    "I12 — Motivation is not evidence",
+    "I13 — Reproducible validators",
+    "I14 — Contract changes are explicit",
+)
+
 HYPOTHESIS_HEADING_RE = re.compile(r"^H\d+ — .+$")
-FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
+INVARIANT_HEADING_RE = re.compile(r"^I\d+ — .+$")
+FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
 
 
 def read_text(relative: str) -> str:
@@ -77,35 +96,38 @@ def load_contract_texts() -> tuple[dict[str, str], list[str]]:
 
 
 def markdown_level2_headings(text: str) -> tuple[str, ...]:
-    """Return level-2 ATX headings outside fenced code blocks."""
+    """Return rendered level-2 ATX headings outside fenced code blocks."""
     headings: list[str] = []
     fence_char: str | None = None
     fence_len = 0
 
     for line in text.splitlines():
-        fence_match = FENCE_RE.match(line)
-        if fence_match:
-            marker = fence_match.group(1)
-            marker_char = marker[0]
-            marker_len = len(marker)
-
-            if fence_char is None:
-                fence_char = marker_char
-                fence_len = marker_len
-                continue
-
-            if marker_char == fence_char and marker_len >= fence_len:
-                fence_char = None
-                fence_len = 0
-                continue
-
         if fence_char is not None:
+            close_match = FENCE_CLOSE_RE.match(line)
+            if close_match:
+                marker = close_match.group(1)
+                if marker[0] == fence_char and len(marker) >= fence_len:
+                    fence_char = None
+                    fence_len = 0
             continue
 
-        if line.startswith("## ") and not line.startswith("### "):
-            heading = line[3:].strip()
-            if heading:
-                headings.append(heading)
+        open_match = FENCE_OPEN_RE.match(line)
+        if open_match:
+            marker = open_match.group(1)
+            info = open_match.group(2)
+            if marker[0] != "`" or "`" not in info:
+                fence_char = marker[0]
+                fence_len = len(marker)
+                continue
+
+        heading_match = ATX_HEADING_RE.match(line)
+        if not heading_match or len(heading_match.group(1)) != 2:
+            continue
+
+        heading = (heading_match.group(2) or "").strip()
+        heading = re.sub(r"[ \t]+#+[ \t]*$", "", heading).rstrip()
+        if heading:
+            headings.append(heading)
 
     return tuple(headings)
 
@@ -120,6 +142,14 @@ def hypothesis_headings(text: str) -> tuple[str, ...]:
 
 def terminology_headings(text: str) -> tuple[str, ...]:
     return markdown_level2_headings(text)
+
+
+def invariant_headings(text: str) -> tuple[str, ...]:
+    return tuple(
+        heading
+        for heading in markdown_level2_headings(text)
+        if INVARIANT_HEADING_RE.fullmatch(heading)
+    )
 
 
 def validate_texts(texts: dict[str, str]) -> list[str]:
@@ -171,9 +201,12 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
                 f"(expected {TERMS!r}, observed {observed_terms!r})"
             )
 
-    for prefix in INVARIANT_PREFIXES:
-        if prefix not in texts["INVARIANTS.md"]:
-            errors.append(f"missing research invariant: {prefix}")
+    observed_invariants = invariant_headings(texts["INVARIANTS.md"])
+    if observed_invariants != INVARIANTS:
+        errors.append(
+            "invariant headings must exactly match the Phase 0 contract "
+            f"(expected {INVARIANTS!r}, observed {observed_invariants!r})"
+        )
 
     if "## Phase 0 — Foundational Research Contract" not in texts["ROADMAP.md"]:
         errors.append("roadmap does not define Phase 0 foundational contract")

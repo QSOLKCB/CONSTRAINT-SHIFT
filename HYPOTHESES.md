@@ -4,11 +4,11 @@ CONSTRAINT-SHIFT begins with six falsifiable hypotheses. A hypothesis may be sup
 
 ## H1 — Specification Primacy
 
-**Claim:** As AI implementation capability increases, persistent specifications and machine-checkable contracts become more important relative to implementation source code as carriers of software intent.
+**Claim:** As independently measured AI implementation capability increases, the relative benefit of persistent specifications and machine-checkable contracts over transient prompt-only workflows increases for preserving, regenerating, and changing intended software behaviour.
 
-**Candidate measurements:** regeneration success against a fixed acceptance suite; change propagation; human implementation editing after regeneration; behavioural divergence across repeated implementations.
+**Candidate measurements:** predeclared AI capability strata measured independently of H1 outcomes; regeneration success against a fixed acceptance suite; change-propagation success; human implementation editing after regeneration; behavioural divergence across repeated implementations; and the interaction between capability level and workflow condition.
 
-**Falsification pressure:** H1 is weakened if equivalent outcomes are consistently achieved with transient prompts and no durable specification under matched conditions.
+**Falsification pressure:** H1 is weakened if the persistent-specification advantage is flat, decreases, or disappears as independently measured implementation capability increases under matched tasks and resource budgets. A benefit observed at only one capability level supports specification utility under that condition but does not by itself support H1's directional claim.
 
 ## H2 — Verification Selection
 

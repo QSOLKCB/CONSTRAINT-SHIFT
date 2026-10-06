@@ -56,6 +56,17 @@ class Phase0ContractTests(unittest.TestCase):
         )
         self.assertEqual([], module.validate_texts(texts))
 
+    def test_invalid_suffixed_fence_marker_does_not_close(self) -> None:
+        texts = contract_texts()
+        fence = chr(96) * 3
+        texts["TERMINOLOGY.md"] += (
+            f"\n{fence}markdown\n"
+            f"{fence}not-a-close\n"
+            "## Example subsection\n"
+            f"{fence}\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_tilde_fenced_level2_heading_is_ignored(self) -> None:
         texts = contract_texts()
         texts["TERMINOLOGY.md"] += (
@@ -64,6 +75,33 @@ class Phase0ContractTests(unittest.TestCase):
             "~~~\n"
         )
         self.assertEqual([], module.validate_texts(texts))
+
+    def test_indented_level2_heading_is_accepted(self) -> None:
+        texts = contract_texts()
+        texts["TERMINOLOGY.md"] = texts["TERMINOLOGY.md"].replace(
+            "## Machine Verifiability",
+            "  ## Machine Verifiability",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_invariant_headings_exactly_match_contract(self) -> None:
+        headings = module.invariant_headings(module.read_text("INVARIANTS.md"))
+        self.assertEqual(module.INVARIANTS, headings)
+
+    def test_invariant_identifier_in_comment_does_not_satisfy_contract(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += "\n<!-- Former label: I14 — -->\n"
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
 
     def test_all_documented_terminology_headings_are_required(self) -> None:
         terminology = module.read_text("TERMINOLOGY.md")
