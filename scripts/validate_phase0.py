@@ -946,8 +946,11 @@ def _markdown_visible_records(
             )
             if (
                 fence_container_signature
-                and raw_line.strip(" \t")
                 and block_line is None
+                and (
+                    raw_line.strip(" \t")
+                    or "quote" in fence_container_signature
+                )
             ):
                 fence_char = None
                 fence_len = 0
@@ -1720,8 +1723,11 @@ def _defined_reference_labels(text: str) -> set[str]:
             )
             if (
                 fence_signature
-                and line.strip(" \t")
                 and block_line is None
+                and (
+                    line.strip(" \t")
+                    or "quote" in fence_signature
+                )
             ):
                 fence_char = None
                 fence_len = 0
@@ -1907,9 +1913,6 @@ def markdown_rendered_prose_text(text: str) -> str:
         starts_block = _line_interrupts_inline_block(
             quote_content
         )
-        _container_column, content = _container_content(
-            quote_content
-        )
 
         effective_quote_depth = quote_depth
         if (
@@ -1926,6 +1929,12 @@ def markdown_rendered_prose_text(text: str) -> str:
             else:
                 blocks.append(" ".join(current))
                 current = []
+
+        paragraph_continuation = bool(current) and not starts_block
+        _container_column, content = _container_content(
+            quote_content,
+            paragraph_open=paragraph_continuation,
+        )
 
         single_line_block = (
             ATX_HEADING_RE.match(content) is not None

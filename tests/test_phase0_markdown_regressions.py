@@ -384,6 +384,47 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             prose,
         )
 
+    def test_quote_scoped_fence_blank_line_boundary_matrix(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        unquoted_blank = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "> ```\n"
+            "\n"
+            f"> [{required}]: /url"
+        )
+        self.assertNotIn(required, unquoted_blank)
+
+        quoted_blank = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "> ```\n"
+            ">\n"
+            f"> [{required}]: /url"
+        )
+        self.assertIn(required, quoted_blank)
+
+    def test_lazy_quote_ordered_marker_matrix(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        plain = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "validator"
+        )
+        ordered_two = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "2. validator"
+        )
+        ordered_one = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "1. validator"
+        )
+
+        self.assertIn(required, plain)
+        self.assertNotIn(required, ordered_two)
+        self.assertIn("2. validator", ordered_two)
+        self.assertNotIn(required, ordered_one)
+        self.assertNotIn("1. validator", ordered_one)
+
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
