@@ -6,7 +6,7 @@ CONSTRAINT-SHIFT is designed as an empirical research repository, not a collecti
 ## Common experiment lifecycle
 
 1. **Select hypothesis.** Identify the exact hypothesis and sub-claim under test.
-2. **Freeze task contract.** Define inputs, outputs, acceptance conditions, resource limits, and stopping rules before comparison.
+2. **Freeze task and analysis contract.** Before outcome inspection, define inputs, outputs, acceptance conditions, resource limits, stopping rules, inclusion/exclusion criteria, invalid-trial and timeout rules, missing-data handling, and the denominators used for primary rates.
 3. **Declare factors.** Record independent variables such as language, compiler, agent, disclosure condition, or assistance mode.
 4. **Declare controls.** Identify variables held constant and unavoidable differences.
 5. **Run trials.** Preserve successful and failed trials.
@@ -52,7 +52,11 @@ Metrics are hypothesis-specific. Phase 0 approves categories, not fixed weights:
 Any composite score must publish its formula, normalization, weights, missing-data policy, and sensitivity to alternative weights.
 
 ## Statistical reporting
-When sample size permits, report sample count, distributions, uncertainty, exploratory versus confirmatory status, exclusions, invalid trials, and dependence between repeated attempts.
+Inclusion, exclusion, invalid-trial, timeout, missing-data, and primary-denominator rules must be frozen before outcome inspection. Failures retained under I3 must not be reclassified after results are known merely to improve a reported rate.
+
+When sample size permits, report sample count, distributions, uncertainty, exploratory versus confirmatory status, all exclusions and invalid trials with reasons, missingness, and dependence between repeated attempts.
+
+Any deviation from the predeclared trial-handling or missing-data rules must be identified explicitly, justified, and accompanied by a sensitivity analysis showing the result under the original rule where technically possible.
 
 ## Human evaluation
 Before recruitment or data collection, a human-participant protocol must define informed-consent procedures, privacy and data-minimization safeguards, data handling and retention, primary outcomes, and any applicable ethics or institutional review. Required approvals must be in place before recruitment or collection begins; if formal review is not required, document that determination beforehand.

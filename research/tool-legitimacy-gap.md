@@ -46,12 +46,12 @@ The direction and size must be reported with uncertainty. The result is conditio
 - same presentation environment;
 - same information other than the disclosure manipulation;
 - predefined primary outcomes;
-- retained exclusions and missing-data rules.
+- inclusion, exclusion, invalid-trial, timeout, denominator, and missing-data rules frozen before outcome inspection.
 
 ## Ethics
-Human-participant work must document consent, privacy, data handling, and applicable ethics requirements before publication of inferential claims.
+Before recruitment or participant data collection begins, the study protocol must define the informed-consent process, privacy and data-minimization safeguards, data handling and retention, and any applicable ethics or institutional review. Required approvals must be in place before recruitment or collection; if formal review is not required, that determination must be documented beforehand.
 
-A study must not falsely attribute an artifact to a human or AI merely to create a treatment condition unless such deception is independently justified, approved where required, and explicitly handled in the protocol. The preferred Phase 7 design uses truthful disclosure versus non-disclosure.
+A study must not falsely attribute an artifact to a human or AI merely to create a treatment condition unless such deception is independently justified, approved before recruitment where required, and explicitly handled in the consent/debriefing protocol. The preferred Phase 7 design uses truthful disclosure versus non-disclosure.
 
 ## Alternative explanations
 Observed differences could reflect beliefs about labour displacement, copyright or training-data concerns, expectations about quality, dislike of a tool, perceived effort, or prior AI familiarity.

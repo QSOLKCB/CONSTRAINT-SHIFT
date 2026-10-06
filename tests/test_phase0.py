@@ -121,6 +121,34 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_raw_html_pre_block_cannot_hide_invariant_heading(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n<pre>\n"
+            "## I14 — Contract changes are explicit\n"
+            "</pre>\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_raw_html_div_block_ignores_level2_heading(self) -> None:
+        texts = contract_texts()
+        texts["TERMINOLOGY.md"] += (
+            "\n<div>\n"
+            "## Example subsection\n"
+            "</div>\n"
+            "\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"

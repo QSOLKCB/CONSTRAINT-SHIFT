@@ -45,9 +45,18 @@ A reproducible gradient across these conditions can support a causal claim about
 
 ### C — Constraint ablation
 
-Constraint effects require a separate controlled design. Where a language/toolchain exposes a check that can be enabled or disabled without changing the task specification, compare matched trials with that check enforced versus withheld and verify both final outputs against the same external behavioural contract.
+Constraint effects require a separate controlled design. Where a language/toolchain exposes a check that can be enabled or disabled without changing the task specification, compare matched trials with that check enforced/exposed to the agent versus withheld from the agent. Both arms must still be evaluated against the same external behavioural contract.
 
-Examples may include optional static-analysis, lint, contract, or type-checking modes where the manipulation is well-defined. The exact check and semantic consequences must be documented.
+After each final artifact is frozen, run the **same withheld constraint check offline on artifacts from both arms** without feeding that result back into the control arm. Report:
+
+- behavioural-contract success;
+- final constraint-check pass/fail and defect count for both arms;
+- repair iterations and effort incurred while the check was exposed/enforced;
+- defects found only by the common offline evaluation.
+
+This prevents the control arm from being counted as equally correct merely because an unchecked constraint violation escaped behavioural tests. If the checked property can instead be encoded into a common independent acceptance contract, that is also acceptable, but the property must be measured identically in both arms.
+
+Examples may include optional static-analysis, lint, contract, or type-checking modes where the manipulation is well-defined. The exact check, common offline evaluation procedure, and semantic consequences must be documented before trials begin.
 
 If constraint strength cannot be varied cleanly within a toolchain, the project must report cross-language results as association rather than causal evidence for H2.
 

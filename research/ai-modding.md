@@ -63,8 +63,17 @@ Where resources permit, add a condition in which AI may alter or propose the mas
 
 If this condition increases recombination while implementation cost is unchanged, report that as evidence for an ideation/design mechanism rather than the H5 implementation-cost mechanism.
 
-### M4 — Mutation diversity
-Run repeated solutions to the same broad design goal and measure behavioural diversity among successful outputs. Report diversity separately from H5 unless the implementation-cost mechanism is also identified.
+### M4 — Matched mutation diversity
+Freeze the same broad design goal, acceptance criteria, repetition count, diversity metric, and total effort budget before condition assignment.
+
+Run matched repeated attempts under at least:
+
+- **Conventional condition:** conventional tooling without generative AI.
+- **AI-assisted condition:** the same task and budget with the predeclared AI assistance available.
+
+Use the same diversity measure in both conditions and retain failed attempts in the trial record. Compare behavioural diversity among accepted executable outputs while also reporting completion rate and the number of accepted outputs, so a condition cannot appear more diverse merely because it produced a smaller selectively successful subset.
+
+This comparison tests the diversity component of H4. Report it separately from H5 unless the implementation-cost mechanism is also identified.
 
 ## Important distinction
 A higher mutation or recombination rate can coexist with lower average quality. Throughput, quality, diversity, and implementation cost are separate outcomes and should not be collapsed without a predeclared aggregation rule.

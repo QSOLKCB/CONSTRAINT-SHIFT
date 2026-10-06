@@ -70,6 +70,27 @@ INVARIANT_HEADING_RE = re.compile(r"^I\d+ — .+$")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
+RAW_HTML_TYPE1_OPEN_RE = re.compile(
+    r"^ {0,3}<(?P<tag>script|pre|style|textarea)(?:[ \\t>]|$)",
+    re.IGNORECASE,
+)
+RAW_HTML_BLOCK_TAGS = (
+    "address", "article", "aside", "base", "basefont", "blockquote", "body",
+    "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
+    "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
+    "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head",
+    "header", "hr", "html", "iframe", "legend", "li", "link", "main", "menu",
+    "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
+    "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
+    "thead", "title", "tr", "track", "ul",
+)
+RAW_HTML_BLOCK_TAG_RE = re.compile(
+    r"^ {0,3}</?(?:" + "|".join(RAW_HTML_BLOCK_TAGS) + r")(?:[ \\t/>]|$)",
+    re.IGNORECASE,
+)
+RAW_HTML_GENERIC_TAG_RE = re.compile(
+    r"^ {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:[ \\t]+[^<>]*?)?/?>[ \\t]*$"
+)
 
 
 def read_text(relative: str) -> str:
@@ -143,12 +164,57 @@ def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
     return "".join(chars), in_comment
 
 
+def _raw_html_block_start(line: str) -> tuple[str, str | None] | None:
+    """Return the raw-HTML block mode and terminator, if one starts here."""
+    type1 = RAW_HTML_TYPE1_OPEN_RE.match(line)
+    if type1:
+        return "tag", type1.group("tag").lower()
+
+    if re.match(r"^ {0,3}<\\?", line):
+        return "marker", "?>"
+
+    if re.match(r"^ {0,3}<!\\[CDATA\\[", line):
+        return "marker", "]]>"
+
+    if re.match(r"^ {0,3}<![A-Z]", line):
+        return "marker", ">"
+
+    if RAW_HTML_BLOCK_TAG_RE.match(line):
+        return "blank", None
+
+    if RAW_HTML_GENERIC_TAG_RE.match(line):
+        return "blank", None
+
+    return None
+
+
+def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
+    if mode == "blank":
+        return not line.strip()
+
+    if mode == "marker":
+        assert terminator is not None
+        return terminator in line
+
+    if mode == "tag":
+        assert terminator is not None
+        return re.search(
+            rf"</{re.escape(terminator)}[ \\t]*>",
+            line,
+            re.IGNORECASE,
+        ) is not None
+
+    raise AssertionError(f"unknown raw HTML block mode: {mode}")
+
+
 def markdown_visible_lines(text: str) -> tuple[str, ...]:
-    """Return Markdown lines visible outside fenced code and HTML comments."""
+    """Return Markdown lines visible outside code, comments, and raw HTML."""
     visible_lines: list[str] = []
     fence_char: str | None = None
     fence_len = 0
     in_html_comment = False
+    raw_html_mode: str | None = None
+    raw_html_terminator: str | None = None
 
     for raw_line in text.splitlines():
         if fence_char is not None:
@@ -158,6 +224,16 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
                 if marker[0] == fence_char and len(marker) >= fence_len:
                     fence_char = None
                     fence_len = 0
+            continue
+
+        if raw_html_mode is not None:
+            if _raw_html_block_ends(
+                raw_line, raw_html_mode, raw_html_terminator
+            ):
+                if raw_html_mode == "blank":
+                    visible_lines.append("")
+                raw_html_mode = None
+                raw_html_terminator = None
             continue
 
         if not in_html_comment:
@@ -170,18 +246,27 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
         visible_line, in_html_comment = _mask_html_comments(
             raw_line, in_html_comment
         )
+        if in_html_comment:
+            visible_lines.append(visible_line)
+            continue
 
-        if not in_html_comment:
-            marker = _valid_fence_open(visible_line)
-            if marker is not None:
-                fence_char = marker[0]
-                fence_len = len(marker)
-                continue
+        marker = _valid_fence_open(visible_line)
+        if marker is not None:
+            fence_char = marker[0]
+            fence_len = len(marker)
+            continue
+
+        raw_html = _raw_html_block_start(visible_line)
+        if raw_html is not None:
+            mode, terminator = raw_html
+            if not _raw_html_block_ends(visible_line, mode, terminator):
+                raw_html_mode = mode
+                raw_html_terminator = terminator
+            continue
 
         visible_lines.append(visible_line)
 
     return tuple(visible_lines)
-
 
 def markdown_visible_text(text: str) -> str:
     return "\n".join(markdown_visible_lines(text))
