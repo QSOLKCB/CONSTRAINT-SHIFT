@@ -75,7 +75,6 @@ LIST_ITEM_RE = re.compile(
     r"^ {0,3}(?:(?P<bullet>[-+*])|(?P<number>\\d{1,9})[.)])"
     r"(?P<spacing>[ \\t]+)"
 )
-LINK_REFERENCE_START_RE = re.compile(r"^ {0,3}\\[[^]\\n]+\\]:[ \\t]*")
 THEMATIC_BREAK_RE = re.compile(
     r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
 )
@@ -612,6 +611,19 @@ def invariant_headings(text: str) -> tuple[str, ...]:
     )
 
 
+def _is_link_reference_definition_start(line: str) -> bool:
+    leading = len(line) - len(line.lstrip(" "))
+    if leading > 3:
+        return False
+
+    stripped = line[leading:]
+    if not stripped.startswith("["):
+        return False
+
+    close = stripped.find("]:")
+    return close > 1
+
+
 def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
     """Approximate rendered prose by excluding link-reference metadata."""
     lines = markdown_visible_lines(text)
@@ -619,7 +631,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
     hide_reference_title = False
 
     for line in lines:
-        if LINK_REFERENCE_START_RE.match(line):
+        if _is_link_reference_definition_start(line):
             hide_reference_title = True
             continue
 
