@@ -170,10 +170,10 @@ def _raw_html_block_start(line: str) -> tuple[str, str | None] | None:
     if type1:
         return "tag", type1.group("tag").lower()
 
-    if re.match(r"^ {0,3}<\\?", line):
+    if re.match(r"^ {0,3}<\?", line):
         return "marker", "?>"
 
-    if re.match(r"^ {0,3}<!\\[CDATA\\[", line):
+    if re.match(r"^ {0,3}<!\[CDATA\[", line):
         return "marker", "]]>"
 
     if re.match(r"^ {0,3}<![A-Z]", line):
