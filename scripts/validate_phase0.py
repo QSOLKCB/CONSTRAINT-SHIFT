@@ -49,8 +49,8 @@ TERMS = (
 )
 
 INVARIANT_PREFIXES = tuple(f"I{i} —" for i in range(1, 15))
-HYPOTHESIS_HEADING_RE = re.compile(r"^## (H\d+ — .+)$", re.MULTILINE)
-LEVEL2_HEADING_RE = re.compile(r"^## (.+)$", re.MULTILINE)
+HYPOTHESIS_HEADING_RE = re.compile(r"^H\d+ — .+$")
+FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 
 
 def read_text(relative: str) -> str:
@@ -76,12 +76,50 @@ def load_contract_texts() -> tuple[dict[str, str], list[str]]:
     return texts, errors
 
 
+def markdown_level2_headings(text: str) -> tuple[str, ...]:
+    """Return level-2 ATX headings outside fenced code blocks."""
+    headings: list[str] = []
+    fence_char: str | None = None
+    fence_len = 0
+
+    for line in text.splitlines():
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            marker_char = marker[0]
+            marker_len = len(marker)
+
+            if fence_char is None:
+                fence_char = marker_char
+                fence_len = marker_len
+                continue
+
+            if marker_char == fence_char and marker_len >= fence_len:
+                fence_char = None
+                fence_len = 0
+                continue
+
+        if fence_char is not None:
+            continue
+
+        if line.startswith("## ") and not line.startswith("### "):
+            heading = line[3:].strip()
+            if heading:
+                headings.append(heading)
+
+    return tuple(headings)
+
+
 def hypothesis_headings(text: str) -> tuple[str, ...]:
-    return tuple(HYPOTHESIS_HEADING_RE.findall(text))
+    return tuple(
+        heading
+        for heading in markdown_level2_headings(text)
+        if HYPOTHESIS_HEADING_RE.fullmatch(heading)
+    )
 
 
 def terminology_headings(text: str) -> tuple[str, ...]:
-    return tuple(LEVEL2_HEADING_RE.findall(text))
+    return markdown_level2_headings(text)
 
 
 def validate_texts(texts: dict[str, str]) -> list[str]:
