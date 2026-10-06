@@ -50,6 +50,7 @@ TERMS = (
 
 INVARIANT_PREFIXES = tuple(f"I{i} —" for i in range(1, 15))
 HYPOTHESIS_HEADING_RE = re.compile(r"^## (H\d+ — .+)$", re.MULTILINE)
+LEVEL2_HEADING_RE = re.compile(r"^## (.+)$", re.MULTILINE)
 
 
 def read_text(relative: str) -> str:
@@ -79,6 +80,10 @@ def hypothesis_headings(text: str) -> tuple[str, ...]:
     return tuple(HYPOTHESIS_HEADING_RE.findall(text))
 
 
+def terminology_headings(text: str) -> tuple[str, ...]:
+    return tuple(LEVEL2_HEADING_RE.findall(text))
+
+
 def validate_texts(texts: dict[str, str]) -> list[str]:
     errors: list[str] = []
 
@@ -94,9 +99,39 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
             f"(expected {HYPOTHESES!r}, observed {observed_hypotheses!r})"
         )
 
-    for term in TERMS:
-        if f"## {term}" not in texts["TERMINOLOGY.md"]:
-            errors.append(f"missing terminology definition: {term}")
+    observed_terms = terminology_headings(texts["TERMINOLOGY.md"])
+    if observed_terms != TERMS:
+        for term in TERMS:
+            if term not in observed_terms:
+                errors.append(f"missing terminology definition: {term}")
+        duplicates = tuple(
+            term for term in observed_terms if observed_terms.count(term) > 1
+        )
+        if duplicates:
+            errors.append(
+                "duplicate terminology definitions: "
+                + ", ".join(dict.fromkeys(duplicates))
+            )
+        unexpected = tuple(term for term in observed_terms if term not in TERMS)
+        if unexpected:
+            errors.append(
+                "unexpected terminology definitions: "
+                + ", ".join(unexpected)
+            )
+        if not any(
+            error.startswith(
+                (
+                    "missing terminology definition:",
+                    "duplicate terminology definitions:",
+                    "unexpected terminology definitions:",
+                )
+            )
+            for error in errors
+        ):
+            errors.append(
+                "terminology headings must exactly match the Phase 0 contract "
+                f"(expected {TERMS!r}, observed {observed_terms!r})"
+            )
 
     for prefix in INVARIANT_PREFIXES:
         if prefix not in texts["INVARIANTS.md"]:
