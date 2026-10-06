@@ -282,6 +282,25 @@ def _strip_columns_prefix(
 
     return line[index:]
 
+def _strip_quote_prefixes(
+    line: str, count: int | None = None
+) -> tuple[int, str] | None:
+    content = line
+    stripped_count = 0
+
+    while count is None or stripped_count < count:
+        quote = re.match(r"^ {0,3}>[ \t]?", content)
+        if quote is None:
+            break
+        content = content[quote.end() :]
+        stripped_count += 1
+
+    if count is not None and stripped_count != count:
+        return None
+
+    return stripped_count, content
+
+
 def _container_content_identity(
     line: str, paragraph_open: bool = False
 ) -> tuple[int, str, bool, tuple[str, ...]]:
@@ -842,6 +861,7 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
     raw_html_container_signature: tuple[str, ...] = ()
     paragraph_open = False
     list_paragraph_column: int | None = None
+    list_paragraph_quote_depth = 0
     list_paragraph_allows_lazy_dedent = False
     index = 0
 
@@ -850,15 +870,30 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
         code_safe_line = code_safe_lines[index]
 
         if list_paragraph_column is not None:
-            if not raw_line.strip(" \t"):
-                paragraph_open = False
-                list_paragraph_column = None
-                list_paragraph_allows_lazy_dedent = False
-            elif _leading_columns(raw_line) < list_paragraph_column:
+            scoped_quote = _strip_quote_prefixes(
+                raw_line, list_paragraph_quote_depth
+            )
+            if scoped_quote is None:
                 if not list_paragraph_allows_lazy_dedent:
                     paragraph_open = False
                 list_paragraph_column = None
+                list_paragraph_quote_depth = 0
                 list_paragraph_allows_lazy_dedent = False
+            else:
+                _quote_depth, list_line = scoped_quote
+                if not list_line.strip(" \t"):
+                    paragraph_open = False
+                    list_paragraph_column = None
+                    list_paragraph_quote_depth = 0
+                    list_paragraph_allows_lazy_dedent = False
+                elif _leading_columns(list_line) < list_paragraph_column:
+                    if not list_paragraph_allows_lazy_dedent:
+                        paragraph_open = False
+                    list_paragraph_column = None
+                    list_paragraph_quote_depth = 0
+                    list_paragraph_allows_lazy_dedent = False
+                elif list_line.strip():
+                    list_paragraph_allows_lazy_dedent = True
 
         if fence_char is not None:
             block_line = _container_scoped_content(
@@ -920,6 +955,7 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                     raw_html_container_signature = ()
                     paragraph_open = False
                 list_paragraph_column = None
+                list_paragraph_quote_depth = 0
                 list_paragraph_allows_lazy_dedent = False
                 index += 1
                 continue
@@ -949,6 +985,7 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                 records.append(("", False))
                 paragraph_open = False
                 list_paragraph_column = None
+                list_paragraph_quote_depth = 0
                 list_paragraph_allows_lazy_dedent = False
                 index += 1
                 continue
@@ -985,6 +1022,7 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
             if definition_end is not None:
                 paragraph_open = False
                 list_paragraph_column = None
+                list_paragraph_quote_depth = 0
                 list_paragraph_allows_lazy_dedent = False
                 index = definition_end
                 continue
@@ -1013,23 +1051,29 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
             continue
 
         records.append((visible_line, paragraph_open))
+        quote_state = _strip_quote_prefixes(visible_line)
+        assert quote_state is not None
+        quote_depth, list_source = quote_state
+
         list_content_column = _list_content_column(
-            visible_line, paragraph_open=paragraph_open
+            list_source, paragraph_open=False
         )
         if list_content_column is not None:
             context = _list_item_context(
-                visible_line, paragraph_open=paragraph_open
+                list_source, paragraph_open=False
             )
             paragraph_open = _list_item_starts_paragraph(
-                visible_line
+                list_source
             )
             if paragraph_open and context is not None:
                 list_paragraph_column = context[0]
+                list_paragraph_quote_depth = quote_depth
                 list_paragraph_allows_lazy_dedent = bool(
                     context[1].strip()
                 )
             else:
                 list_paragraph_column = None
+                list_paragraph_quote_depth = 0
                 list_paragraph_allows_lazy_dedent = False
         else:
             paragraph_open = _paragraph_state_after(
@@ -1051,6 +1095,16 @@ def markdown_level2_headings(text: str) -> tuple[str, ...]:
     headings: list[str] = []
 
     for line, paragraph_open in _markdown_visible_records(text):
+        if paragraph_open:
+            quote_state = _strip_quote_prefixes(line)
+            assert quote_state is not None
+            _quote_depth, paragraph_line = quote_state
+            if (
+                _list_match(paragraph_line) is not None
+                and not _list_can_interrupt_paragraph(paragraph_line)
+            ):
+                continue
+
         _container_column, heading_line, _inner_paragraph = (
             _container_content_state(
                 line, paragraph_open=paragraph_open
@@ -1430,6 +1484,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
                 list_content_column = content_column
                 paragraph_open = False
                 list_paragraph_column = None
+                list_paragraph_quote_depth = 0
                 list_paragraph_allows_lazy_dedent = False
                 index += 1
                 continue

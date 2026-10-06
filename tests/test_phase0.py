@@ -1132,6 +1132,32 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_lazy_dedent_updates_after_visible_list_continuation(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "- \u00a0\n  ordinary paragraph\n2. ## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_quoted_list_dedent_is_measured_inside_quote(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "> - \u00a0\n>   2. ## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"
