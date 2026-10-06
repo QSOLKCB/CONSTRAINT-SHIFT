@@ -689,7 +689,7 @@ def _split_reference_destination(text: str) -> tuple[bool, str]:
     while cursor < len(text):
         char = text[cursor]
 
-        if char == "\" and cursor + 1 < len(text):
+        if char == "\\" and cursor + 1 < len(text):
             cursor += 2
             continue
 
