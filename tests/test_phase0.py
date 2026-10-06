@@ -350,6 +350,94 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_ordered_list_start_two_does_not_interrupt_paragraph(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\nparagraph\n"
+            "2. ~~~markdown\n"
+            "   ## I14 — Contract changes are explicit\n"
+            "   ~~~\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_tab_expanded_list_fence_uses_visual_columns(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n1.\t~~~markdown\n"
+            "   ## I14 — Contract changes are explicit\n"
+            "   ~~~\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_link_reference_metadata_does_not_satisfy_prose_checks(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[hidden]: / "machine-checkable Phase 0 validator"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+        texts = contract_texts()
+        texts["README.md"] = texts["README.md"].replace(
+            "The thesis is **not treated as established fact**",
+            "The thesis remains a research proposition",
+            1,
+        )
+        texts["README.md"] += (
+            '\n[hidden]: / "The thesis is **not treated as established fact**"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn(
+            "README must explicitly separate thesis from established fact",
+            errors,
+        )
+
+    def test_standalone_equals_marker_starts_paragraph(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n=\n"
+            "<span>\n"
+            "## I14 — Contract changes are explicit\n\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_generic_html_tag_allows_gt_inside_quoted_attribute(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            '\n<span title=">">\n'
+            "## I14 — Contract changes are explicit\n\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"

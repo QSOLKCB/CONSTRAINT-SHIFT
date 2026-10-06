@@ -70,6 +70,12 @@ INVARIANT_HEADING_RE = re.compile(r"^I\d+ — .+$")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
+SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \\t]*$")
+LIST_ITEM_RE = re.compile(
+    r"^ {0,3}(?:(?P<bullet>[-+*])|(?P<number>\\d{1,9})[.)])"
+    r"(?P<spacing>[ \\t]+)"
+)
+LINK_REFERENCE_START_RE = re.compile(r"^ {0,3}\\[[^]\\n]+\\]:[ \\t]*")
 THEMATIC_BREAK_RE = re.compile(
     r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
 )
@@ -92,7 +98,10 @@ RAW_HTML_BLOCK_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 RAW_HTML_GENERIC_TAG_RE = re.compile(
-    r"^ {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[^<>]*?)?/?>[ \t]*$"
+    r"^ {0,3}</?[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:[ \t]*=[ \t]*(?:\"[^\"]*\"|'[^']*'|[^ \t\"'=<>\x60]+))?)*"
+    r"[ \t]*/?>[ \t]*$"
 )
 
 
@@ -119,8 +128,33 @@ def load_contract_texts() -> tuple[dict[str, str], list[str]]:
     return texts, errors
 
 
-def _fence_open(line: str) -> tuple[str, int] | None:
-    """Return (marker, base indentation) for a supported fenced-code opener."""
+def _column_at(text: str, index: int) -> int:
+    column = 0
+    for char in text[:index]:
+        if char == "\t":
+            column += 4 - (column % 4)
+        else:
+            column += 1
+    return column
+
+
+def _list_match(line: str) -> re.Match[str] | None:
+    return LIST_ITEM_RE.match(line)
+
+
+def _list_can_interrupt_paragraph(line: str) -> bool:
+    match = _list_match(line)
+    if match is None:
+        return False
+    if match.group("bullet") is not None:
+        return True
+    return int(match.group("number")) == 1
+
+
+def _fence_open(
+    line: str, paragraph_open: bool = False
+) -> tuple[str, int] | None:
+    """Return (marker, base column) for a supported fenced-code opener."""
     match = FENCE_OPEN_RE.match(line)
     if match:
         marker = match.group(1)
@@ -130,11 +164,19 @@ def _fence_open(line: str) -> tuple[str, int] | None:
         return marker, 0
 
     list_match = re.match(
-        r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+"
-        r"(?P<indent> {0,3})(?P<marker>`{3,}|~{3,})(?P<info>.*)$",
+        r"^ {0,3}(?:(?P<bullet>[-+*])|(?P<number>\d{1,9})[.)])"
+        r"(?P<spacing>[ \t]+)(?P<indent> {0,3})"
+        r"(?P<marker>`{3,}|~{3,})(?P<info>.*)$",
         line,
     )
     if not list_match:
+        return None
+
+    if (
+        paragraph_open
+        and list_match.group("number") is not None
+        and int(list_match.group("number")) != 1
+    ):
         return None
 
     marker = list_match.group("marker")
@@ -143,11 +185,14 @@ def _fence_open(line: str) -> tuple[str, int] | None:
         return None
 
     marker_start = list_match.start("marker")
-    return marker, marker_start
+    return marker, _column_at(line, marker_start)
 
 
-def _leading_spaces(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
+def _leading_columns(line: str) -> int:
+    index = 0
+    while index < len(line) and line[index] in " \t":
+        index += 1
+    return _column_at(line, index)
 
 
 def _fence_close(
@@ -155,10 +200,14 @@ def _fence_close(
 ) -> bool:
     min_indent = base_indent
     max_indent = base_indent + 3
-    match = re.match(
-        rf"^ {{{min_indent},{max_indent}}}(?P<marker>{re.escape(marker_char)}"
-        rf"{{{marker_len},}})[ \t]*$",
-        line,
+    leading = _leading_columns(line)
+    if leading < min_indent or leading > max_indent:
+        return False
+
+    stripped = line.lstrip(" \t")
+    match = re.fullmatch(
+        rf"(?P<marker>{re.escape(marker_char)}{{{marker_len},}})[ \t]*",
+        stripped,
     )
     return match is not None
 
@@ -209,13 +258,13 @@ def _line_interrupts_inline_block(line: str) -> bool:
     if THEMATIC_BREAK_RE.match(line):
         return True
 
-    if _fence_open(line) is not None:
+    if _fence_open(line, paragraph_open=True) is not None:
         return True
 
     if re.match(r"^ {0,3}>", line):
         return True
 
-    if re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", line):
+    if _list_can_interrupt_paragraph(line):
         return True
 
     raw_html = _raw_html_block_start(line, allow_generic=False)
@@ -403,9 +452,6 @@ def _line_starts_paragraph_block(line: str) -> bool:
     if THEMATIC_BREAK_RE.match(line):
         return False
 
-    if re.match(r"^ {0,3}(?:=+|-+)[ \t]*$", line):
-        return False
-
     if re.match(r"^ {0,3}>", line):
         return False
 
@@ -420,6 +466,9 @@ def _line_starts_paragraph_block(line: str) -> bool:
 
 def _paragraph_state_after(line: str, was_open: bool) -> bool:
     if not line.strip():
+        return False
+
+    if was_open and SETEXT_UNDERLINE_RE.match(line):
         return False
 
     if was_open and line.startswith("    "):
@@ -451,7 +500,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
             if (
                 fence_base_indent > 0
                 and raw_line.strip()
-                and _leading_spaces(raw_line) < fence_base_indent
+                and _leading_columns(raw_line) < fence_base_indent
             ):
                 fence_char = None
                 fence_len = 0
@@ -477,7 +526,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
             continue
 
         if not in_html_comment:
-            fence = _fence_open(raw_line)
+            fence = _fence_open(raw_line, paragraph_open=paragraph_open)
             if fence is not None:
                 marker, base_indent = fence
                 fence_char = marker[0]
@@ -495,7 +544,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
                 paragraph_open = False
             continue
 
-        fence = _fence_open(raw_line)
+        fence = _fence_open(raw_line, paragraph_open=paragraph_open)
         if fence is not None:
             marker, base_indent = fence
             fence_char = marker[0]
@@ -563,6 +612,35 @@ def invariant_headings(text: str) -> tuple[str, ...]:
     )
 
 
+def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
+    """Approximate rendered prose by excluding link-reference metadata."""
+    lines = markdown_visible_lines(text)
+    rendered: list[str] = []
+    hide_reference_title = False
+
+    for line in lines:
+        if LINK_REFERENCE_START_RE.match(line):
+            hide_reference_title = True
+            continue
+
+        if hide_reference_title:
+            if re.fullmatch(
+                r" {0,3}(?:\"[^\"]*\"|'[^']*'|\([^)]*\))[ \t]*",
+                line,
+            ):
+                hide_reference_title = False
+                continue
+            hide_reference_title = False
+
+        rendered.append(line)
+
+    return tuple(rendered)
+
+
+def markdown_rendered_prose_text(text: str) -> str:
+    return "\n".join(markdown_rendered_prose_lines(text))
+
+
 def validate_texts(texts: dict[str, str]) -> list[str]:
     errors: list[str] = []
 
@@ -624,12 +702,12 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
     if roadmap_headings.count(phase0_heading) != 1:
         errors.append("roadmap does not define exactly one Phase 0 foundational contract")
 
-    roadmap_visible = markdown_visible_text(texts["ROADMAP.md"])
-    if "machine-checkable Phase 0 validator" not in roadmap_visible:
+    roadmap_prose = markdown_rendered_prose_text(texts["ROADMAP.md"])
+    if "machine-checkable Phase 0 validator" not in roadmap_prose:
         errors.append("roadmap does not require Phase 0 validator")
 
-    readme_visible = markdown_visible_text(texts["README.md"])
-    if "The thesis is **not treated as established fact**" not in readme_visible:
+    readme_prose = markdown_rendered_prose_text(texts["README.md"])
+    if "The thesis is **not treated as established fact**" not in readme_prose:
         errors.append("README must explicitly separate thesis from established fact")
 
     for path, text in texts.items():
