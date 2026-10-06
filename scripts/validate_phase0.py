@@ -840,14 +840,16 @@ def _paragraph_state_after(line: str, was_open: bool) -> bool:
 
     return _line_starts_paragraph_block(line)
 
-def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
-    """Return visible lines paired with paragraph state before each line."""
+def _markdown_visible_records(
+    text: str,
+) -> tuple[tuple[str, bool, int], ...]:
+    """Return visible lines with paragraph state and owning quote depth."""
     raw_lines = tuple(text.splitlines())
     code_safe_lines = _mask_code_spans(text)
     if len(code_safe_lines) != len(raw_lines):
         raise AssertionError("code-span masking changed line structure")
 
-    records: list[tuple[str, bool]] = []
+    records: list[tuple[str, bool, int]] = []
     fence_char: str | None = None
     fence_len = 0
     fence_container_column = 0
@@ -951,7 +953,7 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                     block_line, raw_html_mode, raw_html_terminator
                 ):
                     if raw_html_mode == "blank":
-                        records.append(("", False))
+                        records.append(("", False, 0))
                     raw_html_mode = None
                     raw_html_terminator = None
                     raw_html_container_column = 0
@@ -985,7 +987,7 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                 fence_len = len(marker)
                 fence_container_column = container_column
                 fence_container_signature = signature
-                records.append(("", False))
+                records.append(("", False, 0))
                 paragraph_open = False
                 list_paragraph_column = None
                 list_paragraph_quote_depth = 0
@@ -1008,7 +1010,18 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
             )
 
         if in_html_comment:
-            records.append((visible_line, paragraph_open))
+            records.append(
+                (
+                    visible_line,
+                    paragraph_open,
+                    (
+                        list_paragraph_quote_depth
+                        if paragraph_open
+                        and list_paragraph_column is not None
+                        else 0
+                    ),
+                )
+            )
             if not visible_line.strip(" \t"):
                 paragraph_open = False
             index += 1
@@ -1048,12 +1061,23 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                 raw_html_terminator = terminator
                 raw_html_container_column = container_column
                 raw_html_container_signature = container_signature
-            records.append(("", False))
+            records.append(("", False, 0))
             paragraph_open = False
             index += 1
             continue
 
-        records.append((visible_line, paragraph_open))
+        records.append(
+                (
+                    visible_line,
+                    paragraph_open,
+                    (
+                        list_paragraph_quote_depth
+                        if paragraph_open
+                        and list_paragraph_column is not None
+                        else 0
+                    ),
+                )
+            )
         quote_state = _strip_quote_prefixes(visible_line)
         assert quote_state is not None
         quote_depth, list_source = quote_state
@@ -1098,7 +1122,11 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
     return tuple(records)
 
 def markdown_visible_lines(text: str) -> tuple[str, ...]:
-    return tuple(line for line, _paragraph_open in _markdown_visible_records(text))
+    return tuple(
+        line
+        for line, _paragraph_open, _paragraph_quote_depth
+        in _markdown_visible_records(text)
+    )
 
 def markdown_visible_text(text: str) -> str:
     return "\n".join(markdown_visible_lines(text))
@@ -1108,12 +1136,19 @@ def markdown_level2_headings(text: str) -> tuple[str, ...]:
     """Return rendered level-2 ATX headings from visible Markdown."""
     headings: list[str] = []
 
-    for line, paragraph_open in _markdown_visible_records(text):
+    for (
+        line,
+        paragraph_open,
+        paragraph_quote_depth,
+    ) in _markdown_visible_records(text):
         quote_state = _strip_quote_prefixes(line)
         assert quote_state is not None
         quote_depth, paragraph_line = quote_state
 
-        paragraph_applies_here = paragraph_open and quote_depth == 0
+        paragraph_applies_here = (
+            paragraph_open
+            and quote_depth == paragraph_quote_depth
+        )
         if paragraph_applies_here:
             if (
                 _list_match(paragraph_line) is not None
