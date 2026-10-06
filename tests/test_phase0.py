@@ -184,6 +184,73 @@ class Phase0ContractTests(unittest.TestCase):
         )
         self.assertEqual([], module.validate_texts(texts))
 
+    def test_multiline_code_span_masks_comment_marker(self) -> None:
+        texts = contract_texts()
+        texts["TERMINOLOGY.md"] = (
+            "Use ``code\n"
+            "and <!-- marker\n"
+            "continues`` here.\n\n"
+            + texts["TERMINOLOGY.md"]
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_thematic_break_does_not_open_paragraph(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n---\n"
+            "<span>\n"
+            "## I14 — Contract changes are explicit\n"
+            "\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_list_item_fence_hides_nested_heading(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        fence = chr(96) * 3
+        texts["INVARIANTS.md"] += (
+            f"\n- {fence}markdown\n"
+            "  ## I14 — Contract changes are explicit\n"
+            f"  {fence}\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_type1_html_requires_exact_closer(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n<pre>\n"
+            "</pre >\n"
+            "## I14 — Contract changes are explicit\n"
+            "</pre>\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"
