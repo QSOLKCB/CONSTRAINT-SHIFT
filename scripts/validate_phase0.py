@@ -95,15 +95,64 @@ def load_contract_texts() -> tuple[dict[str, str], list[str]]:
     return texts, errors
 
 
-def markdown_level2_headings(text: str) -> tuple[str, ...]:
-    """Return rendered level-2 ATX headings outside fenced code blocks."""
-    headings: list[str] = []
+def _valid_fence_open(line: str) -> str | None:
+    match = FENCE_OPEN_RE.match(line)
+    if not match:
+        return None
+
+    marker = match.group(1)
+    info = match.group(2)
+    if marker[0] == "`" and "`" in info:
+        return None
+    return marker
+
+
+def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    """Mask HTML comments with spaces while preserving source columns."""
+    chars = list(line)
+    cursor = 0
+
+    while cursor < len(line):
+        if in_comment:
+            end = line.find("-->", cursor)
+            if end == -1:
+                for index in range(cursor, len(chars)):
+                    chars[index] = " "
+                return "".join(chars), True
+
+            for index in range(cursor, end + 3):
+                chars[index] = " "
+            cursor = end + 3
+            in_comment = False
+            continue
+
+        start = line.find("<!--", cursor)
+        if start == -1:
+            break
+
+        end = line.find("-->", start + 4)
+        if end == -1:
+            for index in range(start, len(chars)):
+                chars[index] = " "
+            return "".join(chars), True
+
+        for index in range(start, end + 3):
+            chars[index] = " "
+        cursor = end + 3
+
+    return "".join(chars), in_comment
+
+
+def markdown_visible_lines(text: str) -> tuple[str, ...]:
+    """Return Markdown lines visible outside fenced code and HTML comments."""
+    visible_lines: list[str] = []
     fence_char: str | None = None
     fence_len = 0
+    in_html_comment = False
 
-    for line in text.splitlines():
+    for raw_line in text.splitlines():
         if fence_char is not None:
-            close_match = FENCE_CLOSE_RE.match(line)
+            close_match = FENCE_CLOSE_RE.match(raw_line)
             if close_match:
                 marker = close_match.group(1)
                 if marker[0] == fence_char and len(marker) >= fence_len:
@@ -111,15 +160,38 @@ def markdown_level2_headings(text: str) -> tuple[str, ...]:
                     fence_len = 0
             continue
 
-        open_match = FENCE_OPEN_RE.match(line)
-        if open_match:
-            marker = open_match.group(1)
-            info = open_match.group(2)
-            if marker[0] != "`" or "`" not in info:
+        if not in_html_comment:
+            marker = _valid_fence_open(raw_line)
+            if marker is not None:
                 fence_char = marker[0]
                 fence_len = len(marker)
                 continue
 
+        visible_line, in_html_comment = _mask_html_comments(
+            raw_line, in_html_comment
+        )
+
+        if not in_html_comment:
+            marker = _valid_fence_open(visible_line)
+            if marker is not None:
+                fence_char = marker[0]
+                fence_len = len(marker)
+                continue
+
+        visible_lines.append(visible_line)
+
+    return tuple(visible_lines)
+
+
+def markdown_visible_text(text: str) -> str:
+    return "\n".join(markdown_visible_lines(text))
+
+
+def markdown_level2_headings(text: str) -> tuple[str, ...]:
+    """Return rendered level-2 ATX headings from visible Markdown."""
+    headings: list[str] = []
+
+    for line in markdown_visible_lines(text):
         heading_match = ATX_HEADING_RE.match(line)
         if not heading_match or len(heading_match.group(1)) != 2:
             continue
@@ -208,13 +280,17 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
             f"(expected {INVARIANTS!r}, observed {observed_invariants!r})"
         )
 
-    if "## Phase 0 — Foundational Research Contract" not in texts["ROADMAP.md"]:
-        errors.append("roadmap does not define Phase 0 foundational contract")
+    roadmap_headings = markdown_level2_headings(texts["ROADMAP.md"])
+    phase0_heading = "Phase 0 — Foundational Research Contract"
+    if roadmap_headings.count(phase0_heading) != 1:
+        errors.append("roadmap does not define exactly one Phase 0 foundational contract")
 
-    if "machine-checkable Phase 0 validator" not in texts["ROADMAP.md"]:
+    roadmap_visible = markdown_visible_text(texts["ROADMAP.md"])
+    if "machine-checkable Phase 0 validator" not in roadmap_visible:
         errors.append("roadmap does not require Phase 0 validator")
 
-    if "The thesis is **not treated as established fact**" not in texts["README.md"]:
+    readme_visible = markdown_visible_text(texts["README.md"])
+    if "The thesis is **not treated as established fact**" not in readme_visible:
         errors.append("README must explicitly separate thesis from established fact")
 
     for path, text in texts.items():

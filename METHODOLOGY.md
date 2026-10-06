@@ -55,7 +55,9 @@ Any composite score must publish its formula, normalization, weights, missing-da
 When sample size permits, report sample count, distributions, uncertainty, exploratory versus confirmatory status, exclusions, invalid trials, and dependence between repeated attempts.
 
 ## Human evaluation
-Human-participant studies should randomize or counterbalance where appropriate, hold the artifact constant when testing disclosure, predefine primary outcomes, and document consent, privacy, data handling, and applicable ethics requirements.
+Before recruitment or data collection, a human-participant protocol must define informed-consent procedures, privacy and data-minimization safeguards, data handling and retention, primary outcomes, and any applicable ethics or institutional review. Required approvals must be in place before recruitment or collection begins; if formal review is not required, document that determination beforehand.
+
+Once those prerequisites are satisfied, studies should randomize or counterbalance where appropriate and hold the artifact constant when testing disclosure.
 
 ## Legacy-code safety
 Legacy experiments should use public, synthetic, redistributable, or otherwise authorized code. Toy experiments cannot establish safety for production banking, trading, medical, industrial, or other critical systems.

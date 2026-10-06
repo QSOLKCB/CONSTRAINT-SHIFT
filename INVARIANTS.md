@@ -33,7 +33,7 @@ A result that contradicts the central thesis remains valid project output if the
 Tool-legitimacy experiments must hold the evaluated artifact constant across disclosure conditions unless artifact variation is itself the declared independent variable.
 
 ## I11 — Human-subject safeguards
-Experiments involving human participants must document consent, privacy, data handling, and applicable ethics or institutional requirements before public claims are made from participant data.
+Before recruitment or participant data collection begins, human-participant experiments must have a documented protocol covering informed consent, privacy and data minimization, data handling and retention, and any applicable ethics or institutional review. No participant data may be collected until required approvals are in place and the consent process is ready for use; if formal review is not required, that determination should be documented before recruitment.
 
 ## I12 — Motivation is not evidence
 Historical analogies, anecdotes, popularity trends, and project origin stories may motivate a hypothesis but do not count as experimental confirmation.

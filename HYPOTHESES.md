@@ -22,9 +22,9 @@ CONSTRAINT-SHIFT begins with six falsifiable hypotheses. A hypothesis may be sup
 
 **Claim:** AI assistance can extend the operational lifetime of legacy languages and systems by reducing maintenance cost associated with scarce human expertise.
 
-**Candidate measurements:** defect-localization accuracy; repair success; time and intervention; behaviour preserved after repair; repair versus rewrite outcomes.
+**Candidate measurements:** matched AI-assisted versus unassisted conventional-maintenance outcomes under the same task and effort budget; defect-localization accuracy; repair success; active human effort; elapsed time; verification burden; behavioural regressions; and repair-versus-rewrite outcomes.
 
-**Falsification pressure:** H3 is weakened if AI assistance does not materially improve maintainability or if verification burden and behavioural risk negate maintenance gains.
+**Falsification pressure:** H3 is weakened if AI-assisted maintenance does not materially improve outcomes or reduce burden relative to the matched unassisted baseline, or if any gains are offset by verification burden or behavioural risk.
 
 ## H4 — Modding Mutation
 
@@ -36,11 +36,11 @@ CONSTRAINT-SHIFT begins with six falsifiable hypotheses. A hypothesis may be sup
 
 ## H5 — Recombination Acceleration
 
-**Claim:** Reduced implementation cost increases the rate at which mechanics, systems, genres, and implementation patterns are recombined into executable prototypes.
+**Claim:** When implementation cost is reduced while design intent and quality criteria are held fixed, the rate at which mechanics, systems, genres, and implementation patterns are recombined into executable prototypes increases under a fixed total effort budget.
 
-**Candidate measurements:** time to executable prototype; retained source concepts; completion rate; integration defects; behavioural verification.
+**Candidate measurements:** predeclared implementation-cost measures such as active human time, wall-clock time, tool/agent steps, and reliable compute or token cost; successful executable recombinations per fixed total effort budget; cost per accepted prototype; retained source concepts; integration defects; and behavioural verification.
 
-**Falsification pressure:** H5 is weakened if AI increases superficial mashup descriptions without increasing executable, behaviourally verified recombination.
+**Falsification pressure:** H5 is weakened if an implementation-focused intervention fails to reduce the predeclared implementation-cost measure, if measured cost reduction does not increase executable recombination rate under the fixed total budget, or if recombination increases only when design ideation changes while implementation cost remains unchanged.
 
 ## H6 — Tool Legitimacy Gap
 

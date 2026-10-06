@@ -103,6 +103,40 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_multiline_html_comment_cannot_hide_invariant_heading(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n<!--\n"
+            "## I14 — Contract changes are explicit\n"
+            "-->\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
+        texts = contract_texts()
+        required = "## Phase 0 — Foundational Research Contract"
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            required,
+            "## Phase Zero",
+            1,
+        )
+        fence = chr(96) * 3
+        texts["ROADMAP.md"] += f"\n{fence}markdown\n{required}\n{fence}\n"
+        errors = module.validate_texts(texts)
+        self.assertIn(
+            "roadmap does not define exactly one Phase 0 foundational contract",
+            errors,
+        )
+
     def test_all_documented_terminology_headings_are_required(self) -> None:
         terminology = module.read_text("TERMINOLOGY.md")
         self.assertEqual(module.TERMS, module.terminology_headings(terminology))
