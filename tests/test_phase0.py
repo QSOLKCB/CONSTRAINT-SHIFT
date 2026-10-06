@@ -45,10 +45,29 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_fenced_level2_heading_is_ignored(self) -> None:
+        texts = contract_texts()
+        fence = chr(96) * 3
+        texts["TERMINOLOGY.md"] += (
+            f"\n{fence}markdown\n"
+            "## Example subsection\n"
+            "This is example content, not a contract heading.\n"
+            f"{fence}\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_tilde_fenced_level2_heading_is_ignored(self) -> None:
+        texts = contract_texts()
+        texts["TERMINOLOGY.md"] += (
+            "\n~~~markdown\n"
+            "## Another example\n"
+            "~~~\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_all_documented_terminology_headings_are_required(self) -> None:
         terminology = module.read_text("TERMINOLOGY.md")
-        for term in module.TERMS:
-            self.assertIn(f"## {term}", terminology)
+        self.assertEqual(module.TERMS, module.terminology_headings(terminology))
 
     def test_required_files_are_repo_relative(self) -> None:
         for relative in module.REQUIRED_FILES:
