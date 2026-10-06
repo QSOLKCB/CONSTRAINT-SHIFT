@@ -158,28 +158,52 @@ def _list_can_interrupt_paragraph(line: str) -> bool:
     return int(match.group("number")) == 1
 
 
+def _list_item_context(line: str) -> tuple[int, str] | None:
+    """Return (innermost content column, innermost content) for list markers."""
+    segment = line
+    offset = 0
+    context: tuple[int, str] | None = None
+
+    while True:
+        match = _list_match(segment)
+        if match is None:
+            return context
+
+        content = segment[match.end() :]
+        if not content.strip(" \t"):
+            return context
+
+        offset += match.end()
+        context = (_column_at(line, offset), line[offset:])
+        segment = line[offset:]
+
+
 def _list_content_column(line: str) -> int | None:
-    match = _list_match(line)
-    if match is None:
+    context = _list_item_context(line)
+    if context is None:
         return None
+    return context[0]
 
-    if not line[match.end() :].strip(" \t"):
-        return None
 
-    return _column_at(line, match.end())
+def _list_item_is_reference_definition(line: str) -> bool:
+    context = _list_item_context(line)
+    if context is None:
+        return False
+
+    _column, content = context
+    return _reference_definition_end((content,), 0) == 1
 
 
 def _list_item_starts_paragraph(line: str) -> bool:
-    match = _list_match(line)
-    if match is None:
+    context = _list_item_context(line)
+    if context is None:
         return False
 
-    content = line[match.end() :]
-    if not content.strip(" \t"):
+    _column, content = context
+    if _reference_definition_end((content,), 0) is not None:
         return False
 
     return _line_starts_paragraph_block(content)
-
 
 def _fence_open(
     line: str, paragraph_open: bool = False
@@ -906,6 +930,18 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             list_content_column is not None
             and leading_columns >= list_content_column
         ):
+            nested_context = _list_item_context(line)
+            if (
+                nested_context is not None
+                and nested_context[0] > list_content_column
+            ):
+                if not _list_item_is_reference_definition(line):
+                    rendered.append(line)
+                list_content_column = nested_context[0]
+                paragraph_open = _list_item_starts_paragraph(line)
+                index += 1
+                continue
+
             relative_indent = leading_columns - list_content_column
 
             if not paragraph_open and relative_indent >= 4:
@@ -914,9 +950,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
 
             rendered.append(line)
 
-            if paragraph_open:
-                paragraph_open = True
-            else:
+            if not paragraph_open:
                 paragraph_open = _line_starts_paragraph_block(
                     line.lstrip(" \t")
                 )
@@ -926,6 +960,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
 
         if list_content_column is not None and leading_columns < list_content_column:
             list_content_column = None
+            paragraph_open = False
 
         if not paragraph_open and leading_columns >= 4:
             index += 1
@@ -949,13 +984,14 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
                 list_content_column = None
                 continue
 
-        rendered.append(line)
-
         content_column = _list_content_column(line)
         if content_column is not None:
+            if not _list_item_is_reference_definition(line):
+                rendered.append(line)
             list_content_column = content_column
             paragraph_open = _list_item_starts_paragraph(line)
         else:
+            rendered.append(line)
             paragraph_open = _paragraph_state_after(line, paragraph_open)
 
         index += 1
