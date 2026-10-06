@@ -183,7 +183,11 @@ def _list_marker_content(
     # exactly one column as list padding. If that column lies inside a
     # tab expansion, preserve the tab's remaining visual columns.
     content_column = marker_end_column + 1
-    content = _strip_columns_prefix(line, content_column)
+    content = _strip_columns_prefix(
+        line[spacing_start:],
+        1,
+        initial_column=marker_end_column,
+    )
     if content is None:
         return None
 
@@ -228,11 +232,14 @@ def _list_content_column(
     return context[0]
 
 
-def _strip_columns_prefix(line: str, columns: int) -> str | None:
-    column = 0
+def _strip_columns_prefix(
+    line: str, columns: int, initial_column: int = 0
+) -> str | None:
+    column = initial_column
+    target_column = initial_column + columns
     index = 0
 
-    while index < len(line) and column < columns:
+    while index < len(line) and column < target_column:
         char = line[index]
         if char == " ":
             column += 1
@@ -241,8 +248,8 @@ def _strip_columns_prefix(line: str, columns: int) -> str | None:
 
         if char == "\t":
             next_column = column + 4 - (column % 4)
-            if next_column > columns:
-                overshoot = next_column - columns
+            if next_column > target_column:
+                overshoot = next_column - target_column
                 return (" " * overshoot) + line[index + 1 :]
             column = next_column
             index += 1
@@ -250,7 +257,7 @@ def _strip_columns_prefix(line: str, columns: int) -> str | None:
 
         return None
 
-    if column < columns:
+    if column < target_column:
         return None
 
     return line[index:]
