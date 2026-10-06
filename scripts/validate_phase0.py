@@ -887,7 +887,10 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                     list_paragraph_quote_depth = 0
                     list_paragraph_allows_lazy_dedent = False
                 elif _leading_columns(list_line) < list_paragraph_column:
-                    if not list_paragraph_allows_lazy_dedent:
+                    if (
+                        _line_interrupts_inline_block(list_line)
+                        or not list_paragraph_allows_lazy_dedent
+                    ):
                         paragraph_open = False
                     list_paragraph_column = None
                     list_paragraph_quote_depth = 0
@@ -1055,12 +1058,23 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
         assert quote_state is not None
         quote_depth, list_source = quote_state
 
+        same_list_container = (
+            list_paragraph_column is not None
+            and quote_depth == list_paragraph_quote_depth
+        )
+        effective_paragraph_open = (
+            paragraph_open
+            if quote_depth == 0 or same_list_container
+            else False
+        )
+
         list_content_column = _list_content_column(
-            list_source, paragraph_open=False
+            list_source, paragraph_open=effective_paragraph_open
         )
         if list_content_column is not None:
             context = _list_item_context(
-                list_source, paragraph_open=False
+                list_source,
+                paragraph_open=effective_paragraph_open,
             )
             paragraph_open = _list_item_starts_paragraph(
                 list_source
@@ -1077,7 +1091,7 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                 list_paragraph_allows_lazy_dedent = False
         else:
             paragraph_open = _paragraph_state_after(
-                visible_line, paragraph_open
+                visible_line, effective_paragraph_open
             )
         index += 1
 
@@ -1095,10 +1109,12 @@ def markdown_level2_headings(text: str) -> tuple[str, ...]:
     headings: list[str] = []
 
     for line, paragraph_open in _markdown_visible_records(text):
-        if paragraph_open:
-            quote_state = _strip_quote_prefixes(line)
-            assert quote_state is not None
-            _quote_depth, paragraph_line = quote_state
+        quote_state = _strip_quote_prefixes(line)
+        assert quote_state is not None
+        quote_depth, paragraph_line = quote_state
+
+        paragraph_applies_here = paragraph_open and quote_depth == 0
+        if paragraph_applies_here:
             if (
                 _list_match(paragraph_line) is not None
                 and not _list_can_interrupt_paragraph(paragraph_line)
@@ -1107,7 +1123,8 @@ def markdown_level2_headings(text: str) -> tuple[str, ...]:
 
         _container_column, heading_line, _inner_paragraph = (
             _container_content_state(
-                line, paragraph_open=paragraph_open
+                line,
+                paragraph_open=paragraph_applies_here,
             )
         )
         heading_match = ATX_HEADING_RE.match(heading_line)

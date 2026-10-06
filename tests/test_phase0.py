@@ -1158,6 +1158,44 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_fresh_blockquote_resets_outer_paragraph_for_ordered_two(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "paragraph\n> 2. ## I14 — Contract changes are explicit",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_repeated_ordered_two_cannot_interrupt_open_list_paragraph(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "- \u00a0\n"
+            "  2. ## I14 — Contract changes are explicit\n"
+            "  2. ## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_nested_quote_ends_list_paragraph_before_reference_definition(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n> - item\n'
+            '> > [hidden]: /url "machine-checkable Phase 0 validator"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"

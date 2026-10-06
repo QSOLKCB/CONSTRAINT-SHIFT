@@ -203,6 +203,47 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             module.markdown_level2_headings(markdown),
         )
 
+    def test_paragraph_container_transition_matrix(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        cases = (
+            (
+                "fresh-quote-resets-outer-paragraph",
+                f"paragraph\n> 2. ## {heading}\n",
+                True,
+            ),
+            (
+                "same-list-paragraph-rejects-first-two",
+                f"- \u00a0\n  2. ## {heading}\n",
+                False,
+            ),
+            (
+                "same-list-paragraph-rejects-repeated-two",
+                f"- \u00a0\n  2. ## {heading}\n  2. ## {heading}\n",
+                False,
+            ),
+            (
+                "quoted-list-paragraph-rejects-two",
+                f"> - \u00a0\n>   2. ## {heading}\n",
+                False,
+            ),
+            (
+                "nested-quote-is-fresh-container",
+                f"> - item\n> > 2. ## {heading}\n",
+                True,
+            ),
+        )
+
+        for name, markdown, expected_visible in cases:
+            with self.subTest(name=name):
+                headings = module.markdown_level2_headings(markdown)
+                self.assertEqual(expected_visible, heading in headings)
+
+    def test_nested_quote_ends_list_paragraph_before_reference(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            '> - item\n> > [hidden]: /url "machine-checkable Phase 0 validator"'
+        )
+        self.assertNotIn("machine-checkable Phase 0 validator", prose)
+
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
