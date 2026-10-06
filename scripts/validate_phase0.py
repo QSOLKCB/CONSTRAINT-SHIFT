@@ -382,9 +382,34 @@ def _container_scoped_content(
     ) = _container_content_identity(line, paragraph_open=False)
 
     if structural_signature:
-        if structural_signature != container_signature:
-            return None
-        return structural_content
+        if structural_signature == container_signature:
+            return structural_content
+
+        # A mixed container may repeat its explicit quote prefix while
+        # continuing an inner list purely by indentation.
+        prefix_length = len(structural_signature)
+        if (
+            container_signature[:prefix_length]
+            == structural_signature
+            and all(
+                marker == "list"
+                for marker in container_signature[prefix_length:]
+            )
+        ):
+            remaining_columns = (
+                container_column - structural_column
+            )
+            if (
+                remaining_columns >= 0
+                and _leading_columns(structural_content)
+                >= remaining_columns
+            ):
+                return _strip_columns_prefix(
+                    structural_content,
+                    remaining_columns,
+                    initial_column=structural_column,
+                )
+        return None
 
     # List continuations commonly omit the list marker and continue by
     # indentation. Quotes, by contrast, require their explicit marker.
@@ -862,6 +887,7 @@ def _markdown_visible_records(
     raw_html_container_column = 0
     raw_html_container_signature: tuple[str, ...] = ()
     paragraph_open = False
+    paragraph_quote_depth = 0
     list_paragraph_column: int | None = None
     list_paragraph_quote_depth = 0
     list_paragraph_allows_lazy_dedent = False
@@ -894,6 +920,13 @@ def _markdown_visible_records(
                         or not list_paragraph_allows_lazy_dedent
                     ):
                         paragraph_open = False
+                        paragraph_quote_depth = 0
+                    else:
+                        # The list container ended, but the paragraph
+                        # continues lazily in the same outer quote.
+                        paragraph_quote_depth = (
+                            list_paragraph_quote_depth
+                        )
                     list_paragraph_column = None
                     list_paragraph_quote_depth = 0
                     list_paragraph_allows_lazy_dedent = False
@@ -1015,9 +1048,8 @@ def _markdown_visible_records(
                     visible_line,
                     paragraph_open,
                     (
-                        list_paragraph_quote_depth
+                        paragraph_quote_depth
                         if paragraph_open
-                        and list_paragraph_column is not None
                         else 0
                     ),
                 )
@@ -1071,9 +1103,8 @@ def _markdown_visible_records(
                     visible_line,
                     paragraph_open,
                     (
-                        list_paragraph_quote_depth
+                        paragraph_quote_depth
                         if paragraph_open
-                        and list_paragraph_column is not None
                         else 0
                     ),
                 )
@@ -1104,18 +1135,23 @@ def _markdown_visible_records(
                 list_source
             )
             if paragraph_open and context is not None:
+                paragraph_quote_depth = quote_depth
                 list_paragraph_column = context[0]
                 list_paragraph_quote_depth = quote_depth
                 list_paragraph_allows_lazy_dedent = bool(
                     context[1].strip()
                 )
             else:
+                paragraph_quote_depth = 0
                 list_paragraph_column = None
                 list_paragraph_quote_depth = 0
                 list_paragraph_allows_lazy_dedent = False
         else:
             paragraph_open = _paragraph_state_after(
                 visible_line, effective_paragraph_open
+            )
+            paragraph_quote_depth = (
+                quote_depth if paragraph_open else 0
             )
         index += 1
 
@@ -1448,7 +1484,10 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             index += 1
             continue
 
-        leading_columns = _leading_columns(line)
+        quote_state = _strip_quote_prefixes(line)
+        assert quote_state is not None
+        _quote_depth, indentation_line = quote_state
+        leading_columns = _leading_columns(indentation_line)
 
         if (
             list_content_column is not None
@@ -1496,10 +1535,17 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             index += 1
             while index < len(lines):
                 continuation = lines[index]
-                if not continuation.strip(" \t"):
+                continuation_quote = _strip_quote_prefixes(
+                    continuation
+                )
+                assert continuation_quote is not None
+                _continuation_depth, continuation_line = (
+                    continuation_quote
+                )
+                if not continuation_line.strip(" \t"):
                     index += 1
                     continue
-                if _leading_columns(continuation) >= 4:
+                if _leading_columns(continuation_line) >= 4:
                     index += 1
                     continue
                 break
@@ -1587,12 +1633,121 @@ def _matching_inline_link_end(text: str, open_index: int) -> int | None:
     return None
 
 
-def _render_inline_prose(text: str) -> str:
+def _normalize_reference_label(label: str) -> str:
+    return " ".join(label.split()).casefold()
+
+
+def _reference_label_key(line: str) -> str | None:
+    leading = len(line) - len(line.lstrip(" "))
+    if leading > 3:
+        return None
+
+    stripped = line[leading:]
+    if not stripped.startswith("["):
+        return None
+
+    cursor = 1
+    while cursor + 1 < len(stripped):
+        char = stripped[cursor]
+        if char == "[" and not _is_escaped(stripped, cursor):
+            return None
+        if char == "]" and not _is_escaped(stripped, cursor):
+            if stripped[cursor + 1] != ":":
+                return None
+            label = stripped[1:cursor]
+            if not label.strip():
+                return None
+            return _normalize_reference_label(label)
+        cursor += 1
+
+    return None
+
+
+def _defined_reference_labels(text: str) -> set[str]:
+    lines = tuple(text.splitlines())
+    labels: set[str] = set()
+    paragraph_open = False
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+
+        if not line.strip(" \t"):
+            paragraph_open = False
+            index += 1
+            continue
+
+        if not paragraph_open:
+            definition_end = _container_reference_definition_end(
+                lines, index, paragraph_open=False
+            )
+            if definition_end is not None:
+                _column, content = _container_content(line)
+                label = _reference_label_key(content)
+                if label is not None:
+                    labels.add(label)
+                index = definition_end
+                continue
+
+        paragraph_open = _paragraph_state_after(
+            line, paragraph_open
+        )
+        index += 1
+
+    return labels
+
+
+def _inline_html_tag_end(text: str, start: int) -> int | None:
+    if start >= len(text) or text[start] != "<":
+        return None
+
+    quote: str | None = None
+    cursor = start + 1
+
+    while cursor < len(text):
+        char = text[cursor]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            cursor += 1
+            continue
+
+        if char in ('"', "'"):
+            quote = char
+            cursor += 1
+            continue
+
+        if char == ">":
+            candidate = text[start : cursor + 1]
+            if (
+                RAW_HTML_GENERIC_OPEN_TAG_RE.fullmatch(candidate)
+                or RAW_HTML_GENERIC_CLOSE_TAG_RE.fullmatch(candidate)
+            ):
+                return cursor + 1
+            return None
+
+        cursor += 1
+
+    return None
+
+
+def _render_inline_prose(
+    text: str,
+    defined_reference_labels: set[str] | None = None,
+) -> str:
     """Approximate rendered inline text, excluding link metadata/titles."""
     rendered: list[str] = []
     cursor = 0
+    if defined_reference_labels is None:
+        defined_reference_labels = set()
 
     while cursor < len(text):
+        if text[cursor] == "<":
+            html_end = _inline_html_tag_end(text, cursor)
+            if html_end is not None:
+                cursor = html_end
+                continue
+
         label_start = cursor
         image = False
         if text.startswith("![", cursor):
@@ -1623,9 +1778,20 @@ def _render_inline_prose(text: str) -> str:
                 if close + 1 < len(text) and text[close + 1] == "[":
                     ref_close = text.find("]", close + 2)
                     if ref_close != -1:
-                        rendered.append(label)
-                        cursor = ref_close + 1
-                        continue
+                        reference_label = text[
+                            close + 2 : ref_close
+                        ]
+                        if not reference_label:
+                            reference_label = label
+                        if (
+                            _normalize_reference_label(
+                                reference_label
+                            )
+                            in defined_reference_labels
+                        ):
+                            rendered.append(label)
+                            cursor = ref_close + 1
+                            continue
 
         rendered.append(text[cursor])
         cursor += 1
@@ -1635,18 +1801,36 @@ def _render_inline_prose(text: str) -> str:
 
 def markdown_rendered_prose_text(text: str) -> str:
     lines = markdown_rendered_prose_lines(text)
+    defined_reference_labels = _defined_reference_labels(text)
     blocks: list[str] = []
     current: list[str] = []
+    current_quote_depth: int | None = None
 
     for line in lines:
-        if not line.strip(" \t"):
+        quote_state = _strip_quote_prefixes(line)
+        assert quote_state is not None
+        quote_depth, quote_content = quote_state
+
+        if not quote_content.strip(" \t"):
             if current:
                 blocks.append(" ".join(current))
                 current = []
+            current_quote_depth = None
             continue
 
-        _container_column, content = _container_content(line)
-        starts_block = _line_interrupts_inline_block(line)
+        _container_column, content = _container_content(
+            quote_content
+        )
+
+        if (
+            current
+            and current_quote_depth is not None
+            and quote_depth != current_quote_depth
+        ):
+            blocks.append(" ".join(current))
+            current = []
+
+        starts_block = _line_interrupts_inline_block(content)
         single_line_block = (
             ATX_HEADING_RE.match(content) is not None
             or THEMATIC_BREAK_RE.match(content) is not None
@@ -1656,11 +1840,18 @@ def markdown_rendered_prose_text(text: str) -> str:
             blocks.append(" ".join(current))
             current = []
 
-        current.append(_render_inline_prose(line.strip(" \t")))
+        rendered_content = _render_inline_prose(
+            content.strip(" \t"),
+            defined_reference_labels,
+        )
+        if rendered_content:
+            current.append(rendered_content)
+            current_quote_depth = quote_depth
 
-        if single_line_block:
+        if single_line_block and current:
             blocks.append(" ".join(current))
             current = []
+            current_quote_depth = None
 
     if current:
         blocks.append(" ".join(current))

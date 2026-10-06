@@ -244,6 +244,64 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
         )
         self.assertNotIn("machine-checkable Phase 0 validator", prose)
 
+    def test_lazy_quoted_paragraph_retains_quote_owner_after_dedent(self) -> None:
+        markdown = (
+            "> - item\n"
+            "> 2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertNotIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_mixed_quote_list_fence_continues_by_indentation(self) -> None:
+        markdown = (
+            "> - ~~~\n"
+            ">   ## I14 — Contract changes are explicit\n"
+            ">   ~~~\n"
+        )
+        self.assertEqual((), module.markdown_level2_headings(markdown))
+
+    def test_quoted_soft_break_strips_container_markers(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "> validator"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_reference_rendering_resolved_vs_unresolved(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        unresolved = module.markdown_rendered_prose_text(
+            f"[visible][{required}]"
+        )
+        self.assertIn(required, unresolved)
+
+        resolved = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            f"[{required}]: /url"
+        )
+        self.assertNotIn(required, resolved)
+
+    def test_quoted_indented_code_is_not_rendered_prose(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            ">     machine-checkable Phase 0 validator"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_inline_html_attributes_are_not_rendered_prose(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            'visible <span title="machine-checkable Phase 0 validator">'
+            'text</span>'
+        )
+        self.assertEqual("visible text", prose.strip())
+
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
