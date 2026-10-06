@@ -150,12 +150,23 @@ def _list_can_interrupt_paragraph(line: str) -> bool:
     if match is None:
         return False
 
-    if not line[match.end() :].strip():
+    if not line[match.end() :].strip(" \t"):
         return False
 
     if match.group("bullet") is not None:
         return True
     return int(match.group("number")) == 1
+
+
+def _list_content_column(line: str) -> int | None:
+    match = _list_match(line)
+    if match is None:
+        return None
+
+    if not line[match.end() :].strip(" \t"):
+        return None
+
+    return _column_at(line, match.end())
 
 
 def _fence_open(
@@ -256,7 +267,7 @@ def _backtick_run_is_fence_candidate(
 
 
 def _line_interrupts_inline_block(line: str) -> bool:
-    if not line.strip():
+    if not line.strip(" \t"):
         return True
 
     if ATX_HEADING_RE.match(line):
@@ -435,7 +446,7 @@ def _raw_html_block_start(
 
 def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
     if mode == "blank":
-        return not line.strip()
+        return not line.strip(" \t")
 
     if mode == "marker":
         assert terminator is not None
@@ -453,7 +464,7 @@ def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
 
 
 def _line_starts_paragraph_block(line: str) -> bool:
-    if not line.strip():
+    if not line.strip(" \t"):
         return False
 
     if ATX_HEADING_RE.match(line):
@@ -475,7 +486,7 @@ def _line_starts_paragraph_block(line: str) -> bool:
 
 
 def _paragraph_state_after(line: str, was_open: bool) -> bool:
-    if not line.strip():
+    if not line.strip(" \t"):
         return False
 
     if was_open and SETEXT_UNDERLINE_RE.match(line):
@@ -597,7 +608,7 @@ def markdown_level2_headings(text: str) -> tuple[str, ...]:
         if not heading_match or len(heading_match.group(1)) != 2:
             continue
 
-        heading = (heading_match.group(2) or "").strip()
+        heading = (heading_match.group(2) or "").strip(" \t")
         heading = re.sub(r"[ \t]+#+[ \t]*$", "", heading).rstrip()
         if heading:
             headings.append(heading)
@@ -646,7 +657,7 @@ def _link_reference_remainder(line: str) -> str | None:
                 return None
             if stripped[cursor + 1] != ":":
                 return None
-            return stripped[cursor + 2 :].strip()
+            return stripped[cursor + 2 :].strip(" \t")
 
         cursor += 1
 
@@ -657,7 +668,7 @@ def _reference_title_end_from_initial(
     initial: str, lines: tuple[str, ...], next_index: int
 ) -> int | None:
     """Return first line after a valid title starting in initial text."""
-    current = initial.strip()
+    current = initial.strip(" \t")
     if not current:
         return None
 
@@ -677,7 +688,7 @@ def _reference_title_end_from_initial(
         while cursor < len(current):
             char = current[cursor]
             if char == closer and not _is_escaped(current, cursor):
-                if current[cursor + 1 :].strip():
+                if current[cursor + 1 :].strip(" \t"):
                     return None
                 return line_index + 1
             if (
@@ -692,7 +703,7 @@ def _reference_title_end_from_initial(
             return None
 
         current = lines[next_index]
-        if not current.strip():
+        if not current.strip(" \t"):
             return None
 
         line_index = next_index
@@ -734,7 +745,7 @@ def _split_reference_destination(text: str) -> tuple[bool, str]:
                 tail = text[cursor + 1 :]
                 if tail and tail[0] not in " \t":
                     return False, ""
-                return True, tail.strip()
+                return True, tail.strip(" \t")
             if char == "<" and not _is_escaped(text, cursor):
                 return False, ""
             if (
@@ -774,7 +785,7 @@ def _split_reference_destination(text: str) -> tuple[bool, str]:
     if cursor == 0 or depth != 0:
         return False, ""
 
-    return True, text[cursor:].strip()
+    return True, text[cursor:].strip(" \t")
 
 
 def _reference_destination_parts(line: str) -> tuple[bool, str]:
@@ -783,14 +794,14 @@ def _reference_destination_parts(line: str) -> tuple[bool, str]:
     if leading > 3:
         return False, ""
 
-    stripped = line[leading:].strip()
+    stripped = line[leading:].strip(" \t")
     if not stripped:
         return False, ""
 
     return _split_reference_destination(stripped)
 
 def _line_starts_reference_block(line: str) -> bool:
-    if not line.strip():
+    if not line.strip(" \t"):
         return True
 
     if ATX_HEADING_RE.match(line):
@@ -864,12 +875,34 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
     lines = markdown_visible_lines(text)
     rendered: list[str] = []
     paragraph_open = False
+    list_content_column: int | None = None
     index = 0
 
     while index < len(lines):
         line = lines[index]
 
-        if not paragraph_open and line.strip() and _leading_columns(line) >= 4:
+        if not line.strip():
+            rendered.append(line)
+            paragraph_open = False
+            list_content_column = None
+            index += 1
+            continue
+
+        leading_columns = _leading_columns(line)
+
+        if (
+            list_content_column is not None
+            and leading_columns >= list_content_column
+        ):
+            rendered.append(line)
+            paragraph_open = True
+            index += 1
+            continue
+
+        if list_content_column is not None and leading_columns < list_content_column:
+            list_content_column = None
+
+        if not paragraph_open and leading_columns >= 4:
             index += 1
             while index < len(lines):
                 continuation = lines[index]
@@ -888,10 +921,18 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             if definition_end is not None:
                 index = definition_end
                 paragraph_open = False
+                list_content_column = None
                 continue
 
         rendered.append(line)
-        paragraph_open = _paragraph_state_after(line, paragraph_open)
+
+        content_column = _list_content_column(line)
+        if content_column is not None:
+            list_content_column = content_column
+            paragraph_open = False
+        else:
+            paragraph_open = _paragraph_state_after(line, paragraph_open)
+
         index += 1
 
     return tuple(rendered)
@@ -970,7 +1011,7 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
         errors.append("README must explicitly separate thesis from established fact")
 
     for path, text in texts.items():
-        if len(text.strip()) < 80:
+        if len(text.strip(" \t")) < 80:
             errors.append(f"required artifact is suspiciously small: {path}")
 
     return errors

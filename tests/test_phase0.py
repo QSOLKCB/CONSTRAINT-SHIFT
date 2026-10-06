@@ -681,6 +681,51 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_indented_list_continuation_counts_as_rendered_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n- item\n"
+            "    machine-checkable Phase 0 validator\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_nbsp_is_list_item_content_not_blank_whitespace(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\nparagraph\n"
+            "1. \u00a0\n"
+            "<span>\n"
+            "## I14 — Contract changes are explicit\n\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_nbsp_after_multiline_reference_title_invalidates_definition(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[hidden]: /url "machine-checkable Phase 0 validator\n'
+            'continued"\u00a0\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"
