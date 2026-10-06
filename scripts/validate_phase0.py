@@ -469,12 +469,6 @@ def _list_item_starts_paragraph(line: str) -> bool:
     if _reference_definition_end((content,), 0) is not None:
         return False
 
-    # CommonMark list interruption uses ASCII space/tab blankness, but
-    # a content line made only of Unicode whitespace does not contribute
-    # rendered paragraph text for lazy-continuation purposes.
-    if not content.strip():
-        return False
-
     return _line_starts_paragraph_block(content)
 
 def _fence_open_details(
@@ -847,11 +841,24 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
     raw_html_container_column = 0
     raw_html_container_signature: tuple[str, ...] = ()
     paragraph_open = False
+    list_paragraph_column: int | None = None
+    list_paragraph_allows_lazy_dedent = False
     index = 0
 
     while index < len(raw_lines):
         raw_line = raw_lines[index]
         code_safe_line = code_safe_lines[index]
+
+        if list_paragraph_column is not None:
+            if not raw_line.strip(" \t"):
+                paragraph_open = False
+                list_paragraph_column = None
+                list_paragraph_allows_lazy_dedent = False
+            elif _leading_columns(raw_line) < list_paragraph_column:
+                if not list_paragraph_allows_lazy_dedent:
+                    paragraph_open = False
+                list_paragraph_column = None
+                list_paragraph_allows_lazy_dedent = False
 
         if fence_char is not None:
             block_line = _container_scoped_content(
@@ -912,6 +919,8 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                     raw_html_container_column = 0
                     raw_html_container_signature = ()
                     paragraph_open = False
+                list_paragraph_column = None
+                list_paragraph_allows_lazy_dedent = False
                 index += 1
                 continue
 
@@ -939,6 +948,8 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                 fence_container_signature = signature
                 records.append(("", False))
                 paragraph_open = False
+                list_paragraph_column = None
+                list_paragraph_allows_lazy_dedent = False
                 index += 1
                 continue
 
@@ -973,6 +984,8 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
             )
             if definition_end is not None:
                 paragraph_open = False
+                list_paragraph_column = None
+                list_paragraph_allows_lazy_dedent = False
                 index = definition_end
                 continue
 
@@ -1004,9 +1017,20 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
             visible_line, paragraph_open=paragraph_open
         )
         if list_content_column is not None:
+            context = _list_item_context(
+                visible_line, paragraph_open=paragraph_open
+            )
             paragraph_open = _list_item_starts_paragraph(
                 visible_line
             )
+            if paragraph_open and context is not None:
+                list_paragraph_column = context[0]
+                list_paragraph_allows_lazy_dedent = bool(
+                    context[1].strip()
+                )
+            else:
+                list_paragraph_column = None
+                list_paragraph_allows_lazy_dedent = False
         else:
             paragraph_open = _paragraph_state_after(
                 visible_line, paragraph_open
@@ -1405,6 +1429,8 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             ):
                 list_content_column = content_column
                 paragraph_open = False
+                list_paragraph_column = None
+                list_paragraph_allows_lazy_dedent = False
                 index += 1
                 continue
 

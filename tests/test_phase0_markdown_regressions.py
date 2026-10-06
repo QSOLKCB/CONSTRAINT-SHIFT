@@ -172,6 +172,16 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             module.markdown_level2_headings(markdown),
         )
 
+    def test_unicode_only_list_paragraph_blocks_nested_ordered_two(self) -> None:
+        markdown = (
+            "- \u00a0\n"
+            "  2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertNotIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
