@@ -71,7 +71,7 @@ FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
 RAW_HTML_TYPE1_OPEN_RE = re.compile(
-    r"^ {0,3}<(?P<tag>script|pre|style|textarea)(?:[ \\t>]|$)",
+    r"^ {0,3}<(?P<tag>script|pre|style|textarea)(?:[ \t>]|$)",
     re.IGNORECASE,
 )
 RAW_HTML_BLOCK_TAGS = (
@@ -85,11 +85,11 @@ RAW_HTML_BLOCK_TAGS = (
     "thead", "title", "tr", "track", "ul",
 )
 RAW_HTML_BLOCK_TAG_RE = re.compile(
-    r"^ {0,3}</?(?:" + "|".join(RAW_HTML_BLOCK_TAGS) + r")(?:[ \\t/>]|$)",
+    r"^ {0,3}</?(?:" + "|".join(RAW_HTML_BLOCK_TAGS) + r")(?:[ \t/>]|$)",
     re.IGNORECASE,
 )
 RAW_HTML_GENERIC_TAG_RE = re.compile(
-    r"^ {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:[ \\t]+[^<>]*?)?/?>[ \\t]*$"
+    r"^ {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[^<>]*?)?/?>[ \t]*$"
 )
 
 
@@ -128,8 +128,33 @@ def _valid_fence_open(line: str) -> str | None:
     return marker
 
 
+def _backtick_run_end(line: str, start: int) -> int:
+    end = start
+    while end < len(line) and line[end] == "`":
+        end += 1
+    return end
+
+
+def _matching_code_span_end(
+    line: str, opener_start: int, opener_end: int
+) -> int | None:
+    run_length = opener_end - opener_start
+    cursor = opener_end
+
+    while cursor < len(line):
+        tick = line.find("`", cursor)
+        if tick == -1:
+            return None
+        run_end = _backtick_run_end(line, tick)
+        if run_end - tick == run_length:
+            return run_end
+        cursor = run_end
+
+    return None
+
+
 def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
-    """Mask HTML comments with spaces while preserving source columns."""
+    """Mask HTML comments, ignoring comment markers inside code spans."""
     chars = list(line)
     cursor = 0
 
@@ -147,24 +172,37 @@ def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
             in_comment = False
             continue
 
-        start = line.find("<!--", cursor)
-        if start == -1:
+        comment_start = line.find("<!--", cursor)
+        tick_start = line.find("`", cursor)
+
+        if tick_start != -1 and (
+            comment_start == -1 or tick_start < comment_start
+        ):
+            opener_end = _backtick_run_end(line, tick_start)
+            code_end = _matching_code_span_end(
+                line, tick_start, opener_end
+            )
+            cursor = code_end if code_end is not None else opener_end
+            continue
+
+        if comment_start == -1:
             break
 
-        end = line.find("-->", start + 4)
+        end = line.find("-->", comment_start + 4)
         if end == -1:
-            for index in range(start, len(chars)):
+            for index in range(comment_start, len(chars)):
                 chars[index] = " "
             return "".join(chars), True
 
-        for index in range(start, end + 3):
+        for index in range(comment_start, end + 3):
             chars[index] = " "
         cursor = end + 3
 
     return "".join(chars), in_comment
 
-
-def _raw_html_block_start(line: str) -> tuple[str, str | None] | None:
+def _raw_html_block_start(
+    line: str, allow_generic: bool = True
+) -> tuple[str, str | None] | None:
     """Return the raw-HTML block mode and terminator, if one starts here."""
     type1 = RAW_HTML_TYPE1_OPEN_RE.match(line)
     if type1:
@@ -182,7 +220,7 @@ def _raw_html_block_start(line: str) -> tuple[str, str | None] | None:
     if RAW_HTML_BLOCK_TAG_RE.match(line):
         return "blank", None
 
-    if RAW_HTML_GENERIC_TAG_RE.match(line):
+    if allow_generic and RAW_HTML_GENERIC_TAG_RE.match(line):
         return "blank", None
 
     return None
@@ -199,7 +237,7 @@ def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
     if mode == "tag":
         assert terminator is not None
         return re.search(
-            rf"</{re.escape(terminator)}[ \\t]*>",
+            rf"</{re.escape(terminator)}[ \t]*>",
             line,
             re.IGNORECASE,
         ) is not None
@@ -215,6 +253,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
     in_html_comment = False
     raw_html_mode: str | None = None
     raw_html_terminator: str | None = None
+    paragraph_open = False
 
     for raw_line in text.splitlines():
         if fence_char is not None:
@@ -234,6 +273,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
                     visible_lines.append("")
                 raw_html_mode = None
                 raw_html_terminator = None
+                paragraph_open = False
             continue
 
         if not in_html_comment:
@@ -241,6 +281,7 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
             if marker is not None:
                 fence_char = marker[0]
                 fence_len = len(marker)
+                paragraph_open = False
                 continue
 
         visible_line, in_html_comment = _mask_html_comments(
@@ -248,23 +289,40 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
         )
         if in_html_comment:
             visible_lines.append(visible_line)
+            if not visible_line.strip():
+                paragraph_open = False
             continue
 
         marker = _valid_fence_open(visible_line)
         if marker is not None:
             fence_char = marker[0]
             fence_len = len(marker)
+            paragraph_open = False
             continue
 
-        raw_html = _raw_html_block_start(visible_line)
+        raw_html = _raw_html_block_start(
+            visible_line, allow_generic=not paragraph_open
+        )
         if raw_html is not None:
             mode, terminator = raw_html
             if not _raw_html_block_ends(visible_line, mode, terminator):
                 raw_html_mode = mode
                 raw_html_terminator = terminator
+            paragraph_open = False
             continue
 
         visible_lines.append(visible_line)
+
+        if not visible_line.strip():
+            paragraph_open = False
+            continue
+
+        heading_match = ATX_HEADING_RE.match(visible_line)
+        if heading_match:
+            paragraph_open = False
+            continue
+
+        paragraph_open = True
 
     return tuple(visible_lines)
 

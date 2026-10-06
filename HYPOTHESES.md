@@ -22,9 +22,9 @@ CONSTRAINT-SHIFT begins with six falsifiable hypotheses. A hypothesis may be sup
 
 **Claim:** AI assistance can extend the operational lifetime of legacy languages and systems by reducing maintenance cost associated with scarce human expertise.
 
-**Candidate measurements:** matched AI-assisted versus unassisted conventional-maintenance outcomes under the same task and effort budget; defect-localization accuracy; repair success; active human effort; elapsed time; verification burden; behavioural regressions; and repair-versus-rewrite outcomes.
+**Candidate measurements:** predeclared expertise/scarcity strata measured independently of H3 outcomes; matched AI-assisted versus unassisted conventional-maintenance outcomes within each stratum; scarce-expert consultation hours consumed; defect-localization and repair success; active human effort; verification burden; behavioural regressions; and a predeclared maintenance-viability horizon or equivalent lifecycle proxy under a fixed cumulative maintenance budget.
 
-**Falsification pressure:** H3 is weakened if AI-assisted maintenance does not materially improve outcomes or reduce burden relative to the matched unassisted baseline, or if any gains are offset by verification burden or behavioural risk.
+**Falsification pressure:** H3 is weakened if AI assistance does not reduce maintenance burden relative to the matched unassisted baseline under scarce-expertise conditions, if the benefit does not persist or increase as expert access becomes scarcer, if the predeclared maintenance-viability horizon is not extended, or if apparent gains are offset by verification burden or behavioural risk. Short experiments may support only the declared lifecycle proxy, not literal calendar-year lifetime claims.
 
 ## H4 — Modding Mutation
 
@@ -38,7 +38,7 @@ CONSTRAINT-SHIFT begins with six falsifiable hypotheses. A hypothesis may be sup
 
 **Claim:** When implementation cost is reduced while design intent and quality criteria are held fixed, the rate at which mechanics, systems, genres, and implementation patterns are recombined into executable prototypes increases under a fixed total effort budget.
 
-**Candidate measurements:** predeclared implementation-cost measures such as active human time, wall-clock time, tool/agent steps, and reliable compute or token cost; successful executable recombinations per fixed total effort budget; cost per accepted prototype; retained source concepts; integration defects; and behavioural verification.
+**Candidate measurements:** a predeclared outcome-independent implementation-input measure recorded per attempt, such as active human time, wall-clock time, tool/agent steps, or reliable compute/token expenditure; successful executable recombinations per fixed total effort budget; retained source concepts; integration defects; and behavioural verification. Derived efficiency metrics such as cost per accepted prototype may be secondary outcomes but cannot establish the H5 mechanism.
 
 **Falsification pressure:** H5 is weakened if an implementation-focused intervention fails to reduce the predeclared implementation-cost measure, if measured cost reduction does not increase executable recombination rate under the fixed total budget, or if recombination increases only when design ideation changes while implementation cost remains unchanged.
 

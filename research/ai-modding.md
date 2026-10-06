@@ -22,7 +22,9 @@ Observe programming actions, setup actions, asset work, debugging cycles, integr
 Count distinct executable modification attempts completed under a fixed effort budget. Throughput must be reported separately from quality.
 
 ### Implementation cost
-Predeclare one or more implementation-cost measures before outcome inspection. Candidate measures include active human implementation time, wall-clock implementation time, tool/agent steps, reliable token or compute cost, and cost per accepted executable prototype.
+Predeclare at least one **outcome-independent implementation-input measure** as the primary H5 mechanism measure before outcome inspection. It must be measured per attempt regardless of whether that attempt succeeds. Suitable primary measures include active human implementation time per attempt, wall-clock implementation time per attempt, tool/agent steps per attempt, or reliable token/compute expenditure per attempt.
+
+Metrics derived from the number of successful outputs — including cost per accepted executable prototype — may be reported as secondary efficiency outcomes, but they cannot serve as the primary mechanism measure because they are algebraically coupled to recombination success under a fixed budget.
 
 Do not collapse unlike cost measures into a single score unless the aggregation rule and weights are declared in advance.
 
@@ -54,9 +56,9 @@ M1 primarily informs H4 unless its design also satisfies the H5 mechanism-isolat
 ### M2 — Mechanic mashup cost experiment
 Freeze a structured specification combining independent mechanics before condition assignment.
 
-Run conventional-implementation and AI-implementation-assistance conditions under the same total effort budget. Measure predeclared implementation cost, accepted executable prototypes, cost per accepted prototype, integration defects, retained mechanics, and behavioural verification.
+Run conventional-implementation and AI-implementation-assistance conditions under the same total effort budget. Measure the predeclared outcome-independent implementation input **for every attempt**, accepted executable prototypes, integration defects, retained mechanics, and behavioural verification. Cost per accepted prototype may be reported only as a secondary efficiency statistic.
 
-Primary H5 analysis compares the measured implementation-cost difference with the executable recombination-rate difference. A cost reduction without increased recombination, or increased recombination without the predicted cost reduction, weakens the stated mechanism.
+Primary H5 analysis requires an independently measured reduction in implementation input per attempt and compares that reduction with the executable recombination-rate difference. A throughput increase without an independent per-attempt input reduction does not support H5's implementation-cost mechanism. Likewise, a measured input reduction without increased recombination weakens the stated mechanism.
 
 ### M3 — Design-only mechanism control
 Where resources permit, add a condition in which AI may alter or propose the mashup design but implementation remains conventional.
