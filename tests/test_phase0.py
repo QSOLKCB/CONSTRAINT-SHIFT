@@ -1400,6 +1400,104 @@ class Phase0ContractTests(unittest.TestCase):
         errors = module.validate_texts(texts)
         self.assertIn("roadmap does not require Phase 0 validator", errors)
 
+    def test_unquoted_blank_ends_quote_scoped_raw_html(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "> <pre>\n\n"
+            "> ## I14 — Contract changes are explicit",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_unquoted_blank_ends_quote_scoped_html_comment(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "> <!--\n\n"
+            "> ## I14 — Contract changes are explicit",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_markdown_escape_decodes_required_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "machine\\-checkable Phase 0 validator",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_quoted_multiline_code_span_cannot_satisfy_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n> `machine-checkable Phase 0\n"
+            "> validator`\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_oversized_reference_label_remains_visible_prose(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        label = ("a" * 1000) + required
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            required,
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            f"\n[visible][{label}]\n\n"
+            f"[{label}]: /url\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_multiline_inline_link_title_does_not_satisfy_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[visible](/url "machine-checkable Phase 0\n'
+            'validator")\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_unicode_line_separator_cannot_create_invariant_heading(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "ordinary\u0085## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_quote_tab_padding_keeps_heading_as_code(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            ">\t  ## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"

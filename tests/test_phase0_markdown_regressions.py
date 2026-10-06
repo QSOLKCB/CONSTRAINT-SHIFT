@@ -425,6 +425,107 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
         self.assertNotIn(required, ordered_one)
         self.assertNotIn("1. validator", ordered_one)
 
+    def test_quote_scoped_html_blank_boundary_matrix(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+
+        raw_html_unquoted_blank = (
+            "> <pre>\n"
+            "\n"
+            f"> ## {heading}\n"
+        )
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(
+                raw_html_unquoted_blank
+            ),
+        )
+
+        raw_html_quoted_blank = (
+            "> <pre>\n"
+            ">\n"
+            f"> ## {heading}\n"
+        )
+        self.assertNotIn(
+            heading,
+            module.markdown_level2_headings(
+                raw_html_quoted_blank
+            ),
+        )
+
+        comment_unquoted_blank = (
+            "> <!--\n"
+            "\n"
+            f"> ## {heading}\n"
+        )
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(
+                comment_unquoted_blank
+            ),
+        )
+
+    def test_commonmark_escape_rendering_matrix(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        escaped = module.markdown_rendered_prose_text(
+            "machine\\-checkable Phase 0 validator"
+        )
+        non_escape = module.markdown_rendered_prose_text(
+            "machine\\q-checkable Phase 0 validator"
+        )
+        self.assertIn(required, escaped)
+        self.assertNotIn(required, non_escape)
+
+    def test_quoted_multiline_code_span_is_hidden(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> `machine-checkable Phase 0\n"
+            "> validator`"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_reference_label_length_boundary(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        valid_label = ("a" * (999 - len(required))) + required
+        invalid_label = ("a" * (1000 - len(required))) + required
+
+        valid = module.markdown_rendered_prose_text(
+            f"[visible][{valid_label}]\n\n"
+            f"[{valid_label}]: /url"
+        )
+        invalid = module.markdown_rendered_prose_text(
+            f"[visible][{invalid_label}]\n\n"
+            f"[{invalid_label}]: /url"
+        )
+        self.assertNotIn(required, valid)
+        self.assertIn(required, invalid)
+
+    def test_multiline_inline_link_title_is_hidden_metadata(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            '[visible](/url "machine-checkable Phase 0\n'
+            'validator")'
+        )
+        self.assertEqual("visible", prose.strip())
+
+    def test_non_commonmark_unicode_separators_stay_inline(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        for separator in ("\u0085", "\u2028"):
+            with self.subTest(separator=ord(separator)):
+                markdown = f"ordinary{separator}## {heading}"
+                self.assertNotIn(
+                    heading,
+                    module.markdown_level2_headings(markdown),
+                )
+
+    def test_quote_tab_padding_preserves_overshoot(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        markdown = f">\t  ## {heading}"
+        self.assertNotIn(
+            heading,
+            module.markdown_level2_headings(markdown),
+        )
+
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
