@@ -583,6 +583,73 @@ class Phase0ContractTests(unittest.TestCase):
         errors = module.validate_texts(texts)
         self.assertIn("roadmap does not require Phase 0 validator", errors)
 
+    def test_inline_multiline_reference_title_is_hidden(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[hidden]: /url "machine-checkable Phase 0 validator\n'
+            'continued"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_first_unescaped_closing_bracket_invalidates_reference_label(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[foo]bar]: /url "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_blank_ordered_list_item_does_not_interrupt_paragraph(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\nparagraph\n"
+            "1. \n"
+            "<span>\n"
+            "## I14 — Contract changes are explicit\n\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_indented_code_does_not_satisfy_required_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n    machine-checkable Phase 0 validator\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_generic_closing_tag_with_attributes_is_not_raw_html(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n</span foo>\n"
+            "## I14 — Contract changes are explicit\n\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_standalone_equals_marker_starts_paragraph(self) -> None:
         texts = contract_texts()
         texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
