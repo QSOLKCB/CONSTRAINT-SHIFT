@@ -302,6 +302,88 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
         )
         self.assertEqual("visible text", prose.strip())
 
+    def test_nested_fence_sibling_and_indented_continuation(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+
+        sibling = (
+            "- - ~~~\n"
+            f"-   ## {heading}\n"
+        )
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(sibling),
+        )
+
+        continuation = (
+            "> - ~~~\n"
+            f">   ## {heading}\n"
+            ">   ~~~\n"
+        )
+        self.assertNotIn(
+            heading,
+            module.markdown_level2_headings(continuation),
+        )
+
+    def test_reference_definition_after_fence_resolves_link(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        prose = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "```\ncode\n```\n"
+            f"[{required}]: /url"
+        )
+        self.assertNotIn(required, prose)
+
+    def test_blockquote_soft_break_lazy_and_explicit_forms(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        explicit = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n> validator"
+        )
+        lazy = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\nvalidator"
+        )
+        self.assertIn(required, explicit)
+        self.assertIn(required, lazy)
+
+    def test_escaped_inline_html_remains_literal(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        escaped = module.markdown_rendered_prose_text(
+            '\\<span title="' + required + '">'
+        )
+        unescaped = module.markdown_rendered_prose_text(
+            '<span title="' + required + '">text</span>'
+        )
+        self.assertIn(required, escaped)
+        self.assertNotIn(required, unescaped)
+
+    def test_list_boundary_prevents_soft_break_join(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "machine-checkable Phase 0\n- validator"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_full_reference_escaped_bracket_label(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        label = required + "\\]"
+        prose = module.markdown_rendered_prose_text(
+            f"[visible][{label}]\n\n"
+            f"[{label}]: /url"
+        )
+        self.assertNotIn(required, prose)
+
+    def test_quoted_code_after_open_paragraph_is_still_code(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "ordinary paragraph\n"
+            ">     machine-checkable Phase 0 validator"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(

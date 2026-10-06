@@ -391,6 +391,11 @@ def _container_scoped_content(
         if (
             container_signature[:prefix_length]
             == structural_signature
+            and structural_signature
+            and all(
+                marker == "quote"
+                for marker in structural_signature
+            )
             and all(
                 marker == "list"
                 for marker in container_signature[prefix_length:]
@@ -1471,6 +1476,7 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
     lines = markdown_visible_lines(text)
     rendered: list[str] = []
     paragraph_open = False
+    paragraph_quote_depth = 0
     list_content_column: int | None = None
     index = 0
 
@@ -1486,7 +1492,18 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
 
         quote_state = _strip_quote_prefixes(line)
         assert quote_state is not None
-        _quote_depth, indentation_line = quote_state
+        quote_depth, indentation_line = quote_state
+
+        if quote_depth > paragraph_quote_depth:
+            paragraph_open = False
+            list_content_column = None
+        elif (
+            quote_depth < paragraph_quote_depth
+            and _line_interrupts_inline_block(indentation_line)
+        ):
+            paragraph_open = False
+            list_content_column = None
+
         leading_columns = _leading_columns(indentation_line)
 
         if (
@@ -1521,8 +1538,10 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             rendered.append(line)
             if not paragraph_open:
                 paragraph_open = _line_starts_paragraph_block(
-                    line.lstrip(" \t")
+                    indentation_line.lstrip(" \t")
                 )
+            if paragraph_open:
+                paragraph_quote_depth = quote_depth
             index += 1
             continue
 
@@ -1592,7 +1611,12 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
             paragraph_open = _list_item_starts_paragraph(line)
         else:
             rendered.append(line)
-            paragraph_open = _paragraph_state_after(line, paragraph_open)
+            paragraph_open = _paragraph_state_after(
+                indentation_line, paragraph_open
+            )
+            paragraph_quote_depth = (
+                quote_depth if paragraph_open else 0
+            )
 
         index += 1
 
@@ -1633,6 +1657,20 @@ def _matching_inline_link_end(text: str, open_index: int) -> int | None:
     return None
 
 
+def _find_unescaped_closing_bracket(
+    text: str, start: int
+) -> int | None:
+    cursor = start
+    while cursor < len(text):
+        if (
+            text[cursor] == "]"
+            and not _is_escaped(text, cursor)
+        ):
+            return cursor
+        cursor += 1
+    return None
+
+
 def _normalize_reference_label(label: str) -> str:
     return " ".join(label.split()).casefold()
 
@@ -1667,12 +1705,55 @@ def _defined_reference_labels(text: str) -> set[str]:
     lines = tuple(text.splitlines())
     labels: set[str] = set()
     paragraph_open = False
+    fence_char: str | None = None
+    fence_len = 0
+    fence_column = 0
+    fence_signature: tuple[str, ...] = ()
     index = 0
 
     while index < len(lines):
         line = lines[index]
 
+        if fence_char is not None:
+            block_line = _container_scoped_content(
+                line, fence_column, fence_signature
+            )
+            if (
+                fence_signature
+                and line.strip(" \t")
+                and block_line is None
+            ):
+                fence_char = None
+                fence_len = 0
+                fence_column = 0
+                fence_signature = ()
+                paragraph_open = False
+            else:
+                if block_line is None:
+                    block_line = line
+                if _fence_close(
+                    block_line, fence_char, fence_len, 0
+                ):
+                    fence_char = None
+                    fence_len = 0
+                    fence_column = 0
+                    fence_signature = ()
+                    paragraph_open = False
+                index += 1
+                continue
+
         if not line.strip(" \t"):
+            paragraph_open = False
+            index += 1
+            continue
+
+        fence = _fence_open_details(
+            line, paragraph_open=paragraph_open
+        )
+        if fence is not None:
+            marker, fence_column, fence_signature = fence
+            fence_char = marker[0]
+            fence_len = len(marker)
             paragraph_open = False
             index += 1
             continue
@@ -1742,7 +1823,10 @@ def _render_inline_prose(
         defined_reference_labels = set()
 
     while cursor < len(text):
-        if text[cursor] == "<":
+        if (
+            text[cursor] == "<"
+            and not _is_escaped(text, cursor)
+        ):
             html_end = _inline_html_tag_end(text, cursor)
             if html_end is not None:
                 cursor = html_end
@@ -1776,8 +1860,10 @@ def _render_inline_prose(
                         continue
 
                 if close + 1 < len(text) and text[close + 1] == "[":
-                    ref_close = text.find("]", close + 2)
-                    if ref_close != -1:
+                    ref_close = _find_unescaped_closing_bracket(
+                        text, close + 2
+                    )
+                    if ref_close is not None:
                         reference_label = text[
                             close + 2 : ref_close
                         ]
@@ -1818,19 +1904,29 @@ def markdown_rendered_prose_text(text: str) -> str:
             current_quote_depth = None
             continue
 
+        starts_block = _line_interrupts_inline_block(
+            quote_content
+        )
         _container_column, content = _container_content(
             quote_content
         )
 
+        effective_quote_depth = quote_depth
         if (
             current
             and current_quote_depth is not None
             and quote_depth != current_quote_depth
         ):
-            blocks.append(" ".join(current))
-            current = []
+            lazy_quote_continuation = (
+                quote_depth < current_quote_depth
+                and not starts_block
+            )
+            if lazy_quote_continuation:
+                effective_quote_depth = current_quote_depth
+            else:
+                blocks.append(" ".join(current))
+                current = []
 
-        starts_block = _line_interrupts_inline_block(content)
         single_line_block = (
             ATX_HEADING_RE.match(content) is not None
             or THEMATIC_BREAK_RE.match(content) is not None
@@ -1846,7 +1942,7 @@ def markdown_rendered_prose_text(text: str) -> str:
         )
         if rendered_content:
             current.append(rendered_content)
-            current_quote_depth = quote_depth
+            current_quote_depth = effective_quote_depth
 
         if single_line_block and current:
             blocks.append(" ".join(current))
