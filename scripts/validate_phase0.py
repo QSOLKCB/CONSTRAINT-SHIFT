@@ -146,13 +146,18 @@ def _fence_open(line: str) -> tuple[str, int] | None:
     return marker, marker_start
 
 
+def _leading_spaces(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
 def _fence_close(
     line: str, marker_char: str, marker_len: int, base_indent: int
 ) -> bool:
+    min_indent = base_indent
     max_indent = base_indent + 3
     match = re.match(
-        rf"^ {{0,{max_indent}}}(?P<marker>{re.escape(marker_char)}"
-        rf"{{{marker_len},}})[ \\t]*$",
+        rf"^ {{{min_indent},{max_indent}}}(?P<marker>{re.escape(marker_char)}"
+        rf"{{{marker_len},}})[ \t]*$",
         line,
     )
     return match is not None
@@ -164,6 +169,15 @@ def _backtick_run_end(text: str, start: int) -> int:
     return end
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
+
+
 def _line_prefix(text: str, index: int) -> str:
     line_start = text.rfind("\n", 0, index) + 1
     return text[line_start:index]
@@ -172,7 +186,7 @@ def _line_prefix(text: str, index: int) -> str:
 def _backtick_run_is_fence_candidate(
     text: str, start: int, run_length: int
 ) -> bool:
-    if run_length < 3:
+    if run_length < 3 or _is_escaped(text, start):
         return False
 
     prefix = _line_prefix(text, start)
@@ -180,21 +194,72 @@ def _backtick_run_is_fence_candidate(
         return True
 
     return re.fullmatch(
-        r" {0,3}(?:[-+*]|\\d{1,9}[.)])[ \\t]+ {0,3}",
+        r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+ {0,3}",
         prefix,
     ) is not None
+
+
+def _line_interrupts_inline_block(line: str) -> bool:
+    if not line.strip():
+        return True
+
+    if ATX_HEADING_RE.match(line):
+        return True
+
+    if THEMATIC_BREAK_RE.match(line):
+        return True
+
+    if _fence_open(line) is not None:
+        return True
+
+    if re.match(r"^ {0,3}>", line):
+        return True
+
+    if re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", line):
+        return True
+
+    raw_html = _raw_html_block_start(line, allow_generic=False)
+    return raw_html is not None
+
+
+def _inline_block_end(text: str, opener_end: int) -> int:
+    cursor = text.find("\n", opener_end)
+    if cursor == -1:
+        return len(text)
+
+    while cursor < len(text):
+        next_start = cursor + 1
+        next_end = text.find("\n", next_start)
+        if next_end == -1:
+            next_end = len(text)
+
+        line = text[next_start:next_end]
+        if _line_interrupts_inline_block(line):
+            return next_start
+
+        if next_end == len(text):
+            return len(text)
+        cursor = next_end
+
+    return len(text)
 
 
 def _matching_code_span_end(
     text: str, opener_start: int, opener_end: int
 ) -> int | None:
     run_length = opener_end - opener_start
+    limit = _inline_block_end(text, opener_end)
     cursor = opener_end
 
-    while cursor < len(text):
-        tick = text.find("`", cursor)
+    while cursor < limit:
+        tick = text.find("`", cursor, limit)
         if tick == -1:
             return None
+
+        if _is_escaped(text, tick):
+            cursor = tick + 1
+            continue
+
         run_end = _backtick_run_end(text, tick)
         candidate_length = run_end - tick
         if (
@@ -210,7 +275,7 @@ def _matching_code_span_end(
 
 
 def _mask_code_spans(text: str) -> tuple[str, ...]:
-    """Mask matched CommonMark code spans while preserving line structure."""
+    """Mask matched code spans without crossing inline-block boundaries."""
     chars = list(text)
     cursor = 0
 
@@ -218,6 +283,10 @@ def _mask_code_spans(text: str) -> tuple[str, ...]:
         tick = text.find("`", cursor)
         if tick == -1:
             break
+
+        if _is_escaped(text, tick):
+            cursor = tick + 1
+            continue
 
         opener_end = _backtick_run_end(text, tick)
         run_length = opener_end - tick
@@ -243,7 +312,6 @@ def _mask_code_spans(text: str) -> tuple[str, ...]:
         cursor = code_end
 
     return tuple("".join(chars).splitlines())
-
 
 def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
     """Mask HTML comments after code-span content has been protected."""
@@ -325,30 +393,42 @@ def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
     raise AssertionError(f"unknown raw HTML block mode: {mode}")
 
 
-def _is_nonparagraph_block_line(line: str) -> bool:
+def _line_starts_paragraph_block(line: str) -> bool:
     if not line.strip():
-        return True
+        return False
 
     if ATX_HEADING_RE.match(line):
-        return True
+        return False
 
     if THEMATIC_BREAK_RE.match(line):
-        return True
+        return False
 
-    if re.match(r"^ {0,3}(?:=+|-+)[ \\t]*$", line):
-        return True
+    if re.match(r"^ {0,3}(?:=+|-+)[ \t]*$", line):
+        return False
 
     if re.match(r"^ {0,3}>", line):
-        return True
+        return False
 
-    if re.match(r"^ {0,3}(?:[-+*]|\\d{1,9}[.)])[ \\t]+", line):
-        return True
+    if re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", line):
+        return False
 
     if line.startswith("    "):
+        return False
+
+    return True
+
+
+def _paragraph_state_after(line: str, was_open: bool) -> bool:
+    if not line.strip():
+        return False
+
+    if was_open and line.startswith("    "):
         return True
 
-    return False
+    if was_open and not _line_interrupts_inline_block(line):
+        return True
 
+    return _line_starts_paragraph_block(line)
 
 def markdown_visible_lines(text: str) -> tuple[str, ...]:
     """Return Markdown lines visible outside code, comments, and raw HTML."""
@@ -368,13 +448,22 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
 
     for raw_line, code_safe_line in zip(raw_lines, code_safe_lines):
         if fence_char is not None:
-            if _fence_close(
-                raw_line, fence_char, fence_len, fence_base_indent
+            if (
+                fence_base_indent > 0
+                and raw_line.strip()
+                and _leading_spaces(raw_line) < fence_base_indent
             ):
                 fence_char = None
                 fence_len = 0
                 fence_base_indent = 0
-            continue
+            else:
+                if _fence_close(
+                    raw_line, fence_char, fence_len, fence_base_indent
+                ):
+                    fence_char = None
+                    fence_len = 0
+                    fence_base_indent = 0
+                continue
 
         if raw_html_mode is not None:
             if _raw_html_block_ends(
@@ -427,7 +516,9 @@ def markdown_visible_lines(text: str) -> tuple[str, ...]:
             continue
 
         visible_lines.append(visible_line)
-        paragraph_open = not _is_nonparagraph_block_line(visible_line)
+        paragraph_open = _paragraph_state_after(
+            visible_line, paragraph_open
+        )
 
     return tuple(visible_lines)
 
