@@ -1,0 +1,93 @@
+from pathlib import Path
+import importlib.util
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+VALIDATOR = ROOT / "scripts" / "validate_phase0.py"
+
+spec = importlib.util.spec_from_file_location("validate_phase0_regressions", VALIDATOR)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+
+def contract_texts() -> dict[str, str]:
+    return {relative: module.read_text(relative) for relative in module.REQUIRED_FILES}
+
+
+class MarkdownParserRegressionMatrix(unittest.TestCase):
+    def test_heading_container_matrix(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        cases = (
+            ("top-level", f"## {heading}", True),
+            ("bullet", f"- ## {heading}", True),
+            ("blockquote", f"> ## {heading}", True),
+            ("ordered-one-interrupts", f"paragraph\n1. ## {heading}", True),
+            ("ordered-two-does-not-interrupt", f"paragraph\n2. ## {heading}", False),
+            ("four-space-padding", f"-    ## {heading}", True),
+            ("five-space-padding-is-code", f"-     ## {heading}", False),
+        )
+
+        for name, markdown, expected in cases:
+            with self.subTest(name=name):
+                headings = module.markdown_level2_headings(markdown)
+                self.assertEqual(expected, heading in headings)
+
+    def test_tab_overshoot_is_preserved(self) -> None:
+        self.assertEqual(
+            "    /url",
+            module._strip_columns_prefix("\t  /url", 2),
+        )
+
+    def test_list_scoped_html_matrix(self) -> None:
+        cases = (
+            (
+                "generic-html-after-interrupting-bullet",
+                "paragraph\n- <span>\n  ## I14 — Contract changes are explicit\n\n",
+                True,
+            ),
+            (
+                "dedent-ends-list-html",
+                "- <div>\n## I14 — Contract changes are explicit",
+                False,
+            ),
+            (
+                "indented-heading-stays-in-list-html",
+                "- <div>\n  ## I14 — Contract changes are explicit\n\n",
+                True,
+            ),
+        )
+
+        for name, suffix, should_hide in cases:
+            with self.subTest(name=name):
+                texts = contract_texts()
+                texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+                    "## I14 — Contract changes are explicit",
+                    "## Contract changes are explicit",
+                    1,
+                )
+                texts["INVARIANTS.md"] += "\n" + suffix
+                errors = module.validate_texts(texts)
+                has_invariant_error = any(
+                    "invariant headings must exactly match" in error
+                    for error in errors
+                )
+                self.assertEqual(should_hide, has_invariant_error)
+
+    def test_list_reference_tab_overshoot_stays_visible(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n- [hidden]:\n"
+            "\t  /url\n"
+            '  "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+
+if __name__ == "__main__":
+    unittest.main()

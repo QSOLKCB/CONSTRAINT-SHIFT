@@ -896,6 +896,77 @@ class Phase0ContractTests(unittest.TestCase):
         )
         self.assertEqual([], module.validate_texts(texts))
 
+    def test_heading_extraction_preserves_paragraph_state(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "paragraph\n2. ## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_five_space_list_padding_leaves_code_indent(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "-     ## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_list_reference_tab_overshoot_is_not_hidden(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n- [hidden]:\n"
+            "\t  /url\n"
+            '  "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_list_generic_html_resets_outer_paragraph_state(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\nparagraph\n"
+            "- <span>\n"
+            "  ## I14 — Contract changes are explicit\n\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_dedent_ends_list_scoped_raw_html(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n- <div>\n"
+            "## I14 — Contract changes are explicit\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"
