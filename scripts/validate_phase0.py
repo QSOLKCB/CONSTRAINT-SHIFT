@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,15 +34,22 @@ HYPOTHESES = (
 
 TERMS = (
     "Constraint Shift",
+    "Specification Primacy",
     "Implementation Fungibility",
     "AI Language Fitness",
+    "Machine Verifiability",
+    "Diagnostic Feedback Quality",
     "Legacy Preservation Paradox",
     "Second Modding Revolution",
+    "Modding Mutation Rate",
+    "Recombination Acceleration",
     "Tool Legitimacy Gap",
     "AI Disclosure Penalty",
+    "Research Contract",
 )
 
 INVARIANT_PREFIXES = tuple(f"I{i} —" for i in range(1, 15))
+HYPOTHESIS_HEADING_RE = re.compile(r"^## (H\d+ — .+)$", re.MULTILINE)
 
 
 def read_text(relative: str) -> str:
@@ -54,9 +62,9 @@ def read_text(relative: str) -> str:
     return text
 
 
-def validate_repo() -> list[str]:
-    errors: list[str] = []
+def load_contract_texts() -> tuple[dict[str, str], list[str]]:
     texts: dict[str, str] = {}
+    errors: list[str] = []
 
     for relative in REQUIRED_FILES:
         try:
@@ -64,12 +72,27 @@ def validate_repo() -> list[str]:
         except AssertionError as exc:
             errors.append(str(exc))
 
-    if errors:
+    return texts, errors
+
+
+def hypothesis_headings(text: str) -> tuple[str, ...]:
+    return tuple(HYPOTHESIS_HEADING_RE.findall(text))
+
+
+def validate_texts(texts: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+
+    missing = [relative for relative in REQUIRED_FILES if relative not in texts]
+    if missing:
+        errors.extend(f"missing required file: {relative}" for relative in missing)
         return errors
 
-    for identifier in HYPOTHESES:
-        if identifier not in texts["HYPOTHESES.md"]:
-            errors.append(f"missing hypothesis contract: {identifier}")
+    observed_hypotheses = hypothesis_headings(texts["HYPOTHESES.md"])
+    if observed_hypotheses != HYPOTHESES:
+        errors.append(
+            "hypothesis headings must exactly match the Phase 0 contract "
+            f"(expected {HYPOTHESES!r}, observed {observed_hypotheses!r})"
+        )
 
     for term in TERMS:
         if f"## {term}" not in texts["TERMINOLOGY.md"]:
@@ -93,6 +116,13 @@ def validate_repo() -> list[str]:
             errors.append(f"required artifact is suspiciously small: {path}")
 
     return errors
+
+
+def validate_repo() -> list[str]:
+    texts, errors = load_contract_texts()
+    if errors:
+        return errors
+    return validate_texts(texts)
 
 
 def main() -> int:
