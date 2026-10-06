@@ -131,8 +131,10 @@ def load_contract_texts() -> tuple[dict[str, str], list[str]]:
     return texts, errors
 
 
-def _column_at(text: str, index: int) -> int:
-    column = 0
+def _column_at(
+    text: str, index: int, initial_column: int = 0
+) -> int:
+    column = initial_column
     for char in text[:index]:
         if char == "\t":
             column += 4 - (column % 4)
@@ -159,9 +161,11 @@ def _list_can_interrupt_paragraph(line: str) -> bool:
 
 
 def _list_marker_content(
-    line: str, paragraph_open: bool = False
+    line: str,
+    paragraph_open: bool = False,
+    initial_column: int = 0,
 ) -> tuple[int, str] | None:
-    """Return visual content column and content after one list marker."""
+    """Return absolute visual content column and content after one list marker."""
     match = _list_match(line)
     if match is None:
         return None
@@ -171,17 +175,19 @@ def _list_marker_content(
 
     spacing_start = match.start("spacing")
     spacing_end = match.end("spacing")
-    marker_end_column = _column_at(line, spacing_start)
-    padding_columns = (
-        _column_at(line, spacing_end) - marker_end_column
+    marker_end_column = _column_at(
+        line, spacing_start, initial_column=initial_column
     )
+    spacing_end_column = _column_at(
+        line, spacing_end, initial_column=initial_column
+    )
+    padding_columns = spacing_end_column - marker_end_column
 
     if padding_columns <= 4:
-        return _column_at(line, spacing_end), line[spacing_end:]
+        return spacing_end_column, line[spacing_end:]
 
-    # With five or more visual columns after a marker, CommonMark uses
-    # exactly one column as list padding. If that column lies inside a
-    # tab expansion, preserve the tab's remaining visual columns.
+    # Five or more visual columns: consume exactly one visual column as
+    # list padding and preserve any residual tab expansion as indentation.
     content_column = marker_end_column + 1
     content = _strip_columns_prefix(
         line[spacing_start:],
@@ -193,14 +199,14 @@ def _list_marker_content(
 
     return content_column, content
 
-
-def _list_item_context(
+def _list_item_context_details(
     line: str, paragraph_open: bool = False
-) -> tuple[int, str] | None:
-    """Return (innermost content column, innermost content) for list markers."""
+) -> tuple[int, str, tuple[str, ...]] | None:
+    """Return innermost column/content plus explicit list-container identity."""
     segment = line
     base_column = 0
-    context: tuple[int, str] | None = None
+    context: tuple[int, str, tuple[str, ...]] | None = None
+    signature: list[str] = []
     first_marker = True
 
     while True:
@@ -210,18 +216,32 @@ def _list_item_context(
         marker_content = _list_marker_content(
             segment,
             paragraph_open=paragraph_open if first_marker else False,
+            initial_column=base_column,
         )
         if marker_content is None:
             return context
 
-        local_column, content = marker_content
+        content_column, content = marker_content
         if not content.strip(" \t"):
             return context
 
-        base_column += local_column
-        context = (base_column, content)
+        signature.append("list")
+        base_column = content_column
+        context = (base_column, content, tuple(signature))
         segment = content
         first_marker = False
+
+
+def _list_item_context(
+    line: str, paragraph_open: bool = False
+) -> tuple[int, str] | None:
+    details = _list_item_context_details(
+        line, paragraph_open=paragraph_open
+    )
+    if details is None:
+        return None
+    column, content, _signature = details
+    return column, content
 
 def _list_content_column(
     line: str, paragraph_open: bool = False
@@ -262,42 +282,143 @@ def _strip_columns_prefix(
 
     return line[index:]
 
-def _container_content_state(
+def _container_content_identity(
     line: str, paragraph_open: bool = False
-) -> tuple[int, str, bool]:
-    """Return prefix width, inner content, and paragraph state in container."""
+) -> tuple[int, str, bool, tuple[str, ...]]:
+    """Return prefix width, content, inner paragraph state, and identity."""
     content = line
     base_column = 0
     inner_paragraph_open = paragraph_open
+    signature: list[str] = []
 
     while True:
         quote = re.match(r"^ {0,3}>[ \t]?", content)
         if quote is not None:
-            base_column += _column_at(content, quote.end())
+            base_column = _column_at(
+                content, quote.end(), initial_column=base_column
+            )
             content = content[quote.end() :]
+            signature.append("quote")
             inner_paragraph_open = False
             continue
 
-        context = _list_item_context(
+        details = _list_item_context_details(
             content, paragraph_open=inner_paragraph_open
         )
-        if context is not None:
-            column, nested = context
-            base_column += column
+        if details is not None:
+            column, nested, list_signature = details
+            # list context columns are absolute from the current base.
+            if base_column:
+                column += base_column
+            base_column = column
             content = nested
+            signature.extend(list_signature)
             inner_paragraph_open = False
             continue
 
-        return base_column, content, inner_paragraph_open
+        return (
+            base_column,
+            content,
+            inner_paragraph_open,
+            tuple(signature),
+        )
+
+
+def _container_content_state(
+    line: str, paragraph_open: bool = False
+) -> tuple[int, str, bool]:
+    column, content, inner_paragraph_open, _signature = (
+        _container_content_identity(
+            line, paragraph_open=paragraph_open
+        )
+    )
+    return column, content, inner_paragraph_open
 
 
 def _container_content(
     line: str, paragraph_open: bool = False
 ) -> tuple[int, str]:
-    base_column, content, _inner_paragraph_open = _container_content_state(
-        line, paragraph_open=paragraph_open
+    column, content, _paragraph_open, _signature = (
+        _container_content_identity(
+            line, paragraph_open=paragraph_open
+        )
     )
-    return base_column, content
+    return column, content
+
+
+def _container_scoped_content(
+    line: str,
+    container_column: int,
+    container_signature: tuple[str, ...],
+) -> str | None:
+    """Return content only when the opener's Markdown container continues."""
+    if not container_signature and container_column <= 0:
+        return line
+
+    (
+        structural_column,
+        structural_content,
+        _paragraph_open,
+        structural_signature,
+    ) = _container_content_identity(line, paragraph_open=False)
+
+    if structural_signature:
+        if structural_signature != container_signature:
+            return None
+        return structural_content
+
+    # List continuations commonly omit the list marker and continue by
+    # indentation. Quotes, by contrast, require their explicit marker.
+    if container_signature and all(
+        marker == "list" for marker in container_signature
+    ):
+        if _leading_columns(line) >= container_column:
+            return _strip_columns_prefix(line, container_column)
+
+    return None
+
+def _container_reference_definition_end(
+    lines: tuple[str, ...],
+    start: int,
+    paragraph_open: bool = False,
+) -> int | None:
+    (
+        container_column,
+        first_content,
+        inner_paragraph_open,
+        container_signature,
+    ) = _container_content_identity(
+        lines[start], paragraph_open=paragraph_open
+    )
+    if inner_paragraph_open:
+        return None
+
+    virtual_lines = [first_content]
+    cursor = start + 1
+
+    while cursor < len(lines):
+        line = lines[cursor]
+        if not line.strip(" \t"):
+            virtual_lines.append("")
+            break
+
+        scoped = _container_scoped_content(
+            line, container_column, container_signature
+        )
+        if scoped is None:
+            break
+
+        virtual_lines.append(scoped)
+        cursor += 1
+
+    definition_end = _reference_definition_end(
+        tuple(virtual_lines), 0
+    )
+    if definition_end is None:
+        return None
+
+    return start + definition_end
+
 
 def _list_reference_definition_end(
     lines: tuple[str, ...], start: int
@@ -350,22 +471,27 @@ def _list_item_starts_paragraph(line: str) -> bool:
 
     return _line_starts_paragraph_block(content)
 
-def _fence_open(
+def _fence_open_details(
     line: str, paragraph_open: bool = False
-) -> tuple[str, int] | None:
-    """Return (marker, base column) for a supported fenced-code opener."""
+) -> tuple[str, int, tuple[str, ...]] | None:
+    """Return marker, container column, and container identity."""
     match = FENCE_OPEN_RE.match(line)
     if match:
         marker = match.group(1)
         info = match.group(2)
         if marker[0] == "`" and "`" in info:
             return None
-        return marker, 0
+        return marker, 0, ()
 
-    base_column, content = _container_content(
+    (
+        container_column,
+        content,
+        _inner_paragraph_open,
+        signature,
+    ) = _container_content_identity(
         line, paragraph_open=paragraph_open
     )
-    if base_column == 0:
+    if container_column == 0:
         return None
 
     match = FENCE_OPEN_RE.match(content)
@@ -377,7 +503,19 @@ def _fence_open(
     if marker[0] == "`" and "`" in info:
         return None
 
-    return marker, base_column + _column_at(content, match.start(1))
+    return marker, container_column, signature
+
+
+def _fence_open(
+    line: str, paragraph_open: bool = False
+) -> tuple[str, int] | None:
+    details = _fence_open_details(
+        line, paragraph_open=paragraph_open
+    )
+    if details is None:
+        return None
+    marker, container_column, _signature = details
+    return marker, container_column
 
 def _leading_columns(line: str) -> int:
     index = 0
@@ -618,23 +756,14 @@ def _raw_html_block_start(
 
 
 def _raw_html_container_content(
-    line: str, container_column: int
+    line: str,
+    container_column: int,
+    container_signature: tuple[str, ...],
 ) -> str | None:
-    """Return content while a container-scoped raw HTML block remains active."""
-    if container_column <= 0:
-        return line
-
-    structural_column, structural_content, _paragraph_open = (
-        _container_content_state(line, paragraph_open=False)
+    """Return content while the exact raw-HTML container remains active."""
+    return _container_scoped_content(
+        line, container_column, container_signature
     )
-    if structural_column >= container_column:
-        return structural_content
-
-    if _leading_columns(line) >= container_column:
-        return _strip_columns_prefix(line, container_column)
-
-    return None
-
 
 def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
     if mode == "blank":
@@ -694,7 +823,7 @@ def _paragraph_state_after(line: str, was_open: bool) -> bool:
 
 def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
     """Return visible lines paired with paragraph state before each line."""
-    raw_lines = text.splitlines()
+    raw_lines = tuple(text.splitlines())
     code_safe_lines = _mask_code_spans(text)
     if len(code_safe_lines) != len(raw_lines):
         raise AssertionError("code-span masking changed line structure")
@@ -702,44 +831,66 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
     records: list[tuple[str, bool]] = []
     fence_char: str | None = None
     fence_len = 0
-    fence_base_indent = 0
+    fence_container_column = 0
+    fence_container_signature: tuple[str, ...] = ()
     in_html_comment = False
+    comment_container_column = 0
+    comment_container_signature: tuple[str, ...] = ()
     raw_html_mode: str | None = None
     raw_html_terminator: str | None = None
     raw_html_container_column = 0
+    raw_html_container_signature: tuple[str, ...] = ()
     paragraph_open = False
+    index = 0
 
-    for raw_line, code_safe_line in zip(raw_lines, code_safe_lines):
+    while index < len(raw_lines):
+        raw_line = raw_lines[index]
+        code_safe_line = code_safe_lines[index]
+
         if fence_char is not None:
+            block_line = _container_scoped_content(
+                raw_line,
+                fence_container_column,
+                fence_container_signature,
+            )
             if (
-                fence_base_indent > 0
+                fence_container_signature
                 and raw_line.strip(" \t")
-                and _leading_columns(raw_line) < fence_base_indent
+                and block_line is None
             ):
                 fence_char = None
                 fence_len = 0
-                fence_base_indent = 0
+                fence_container_column = 0
+                fence_container_signature = ()
+                paragraph_open = False
             else:
+                if block_line is None:
+                    block_line = raw_line
                 if _fence_close(
-                    raw_line, fence_char, fence_len, fence_base_indent
+                    block_line, fence_char, fence_len, 0
                 ):
                     fence_char = None
                     fence_len = 0
-                    fence_base_indent = 0
+                    fence_container_column = 0
+                    fence_container_signature = ()
+                index += 1
                 continue
 
         if raw_html_mode is not None:
             block_line = _raw_html_container_content(
-                code_safe_line, raw_html_container_column
+                code_safe_line,
+                raw_html_container_column,
+                raw_html_container_signature,
             )
             if (
-                raw_html_container_column > 0
+                raw_html_container_signature
                 and raw_line.strip(" \t")
                 and block_line is None
             ):
                 raw_html_mode = None
                 raw_html_terminator = None
                 raw_html_container_column = 0
+                raw_html_container_signature = ()
                 paragraph_open = False
             else:
                 if block_line is None:
@@ -753,44 +904,78 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                     raw_html_mode = None
                     raw_html_terminator = None
                     raw_html_container_column = 0
+                    raw_html_container_signature = ()
                     paragraph_open = False
+                index += 1
                 continue
+
+        if in_html_comment and comment_container_signature:
+            scoped = _container_scoped_content(
+                code_safe_line,
+                comment_container_column,
+                comment_container_signature,
+            )
+            if raw_line.strip(" \t") and scoped is None:
+                in_html_comment = False
+                comment_container_column = 0
+                comment_container_signature = ()
+                paragraph_open = False
 
         if not in_html_comment:
-            fence = _fence_open(raw_line, paragraph_open=paragraph_open)
+            fence = _fence_open_details(
+                raw_line, paragraph_open=paragraph_open
+            )
             if fence is not None:
-                marker, base_indent = fence
+                marker, container_column, signature = fence
                 fence_char = marker[0]
                 fence_len = len(marker)
-                fence_base_indent = base_indent
+                fence_container_column = container_column
+                fence_container_signature = signature
                 records.append(("", False))
                 paragraph_open = False
+                index += 1
                 continue
 
+        was_in_html_comment = in_html_comment
         visible_line, in_html_comment = _mask_html_comments(
             code_safe_line, in_html_comment
         )
+        if in_html_comment and not was_in_html_comment:
+            (
+                comment_container_column,
+                _comment_content,
+                _comment_paragraph,
+                comment_container_signature,
+            ) = _container_content_identity(
+                raw_line, paragraph_open=paragraph_open
+            )
+
         if in_html_comment:
             records.append((visible_line, paragraph_open))
             if not visible_line.strip(" \t"):
                 paragraph_open = False
+            index += 1
             continue
 
-        fence = _fence_open(raw_line, paragraph_open=paragraph_open)
-        if fence is not None:
-            marker, base_indent = fence
-            fence_char = marker[0]
-            fence_len = len(marker)
-            fence_base_indent = base_indent
-            records.append(("", False))
-            paragraph_open = False
-            continue
+        if was_in_html_comment and not in_html_comment:
+            comment_container_column = 0
+            comment_container_signature = ()
+
+        if not paragraph_open:
+            definition_end = _container_reference_definition_end(
+                code_safe_lines, index, paragraph_open=False
+            )
+            if definition_end is not None:
+                paragraph_open = False
+                index = definition_end
+                continue
 
         (
             container_column,
             block_content,
             inner_paragraph_open,
-        ) = _container_content_state(
+            container_signature,
+        ) = _container_content_identity(
             visible_line, paragraph_open=paragraph_open
         )
         raw_html = _raw_html_block_start(
@@ -802,23 +987,19 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                 raw_html_mode = mode
                 raw_html_terminator = terminator
                 raw_html_container_column = container_column
+                raw_html_container_signature = container_signature
             records.append(("", False))
             paragraph_open = False
+            index += 1
             continue
 
         records.append((visible_line, paragraph_open))
-        if (
-            not paragraph_open
-            and _reference_definition_end((visible_line,), 0) == 1
-        ):
-            paragraph_open = False
-        else:
-            paragraph_open = _paragraph_state_after(
-                visible_line, paragraph_open
-            )
+        paragraph_open = _paragraph_state_after(
+            visible_line, paragraph_open
+        )
+        index += 1
 
     return tuple(records)
-
 
 def markdown_visible_lines(text: str) -> tuple[str, ...]:
     return tuple(line for line, _paragraph_open in _markdown_visible_records(text))
@@ -886,6 +1067,9 @@ def _link_reference_remainder(line: str) -> str | None:
 
         if char == "]" and not _is_escaped(stripped, cursor):
             if cursor <= 1:
+                return None
+            label = stripped[1:cursor]
+            if not label.strip():
                 return None
             if stripped[cursor + 1] != ":":
                 return None
@@ -1197,6 +1381,19 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
                 paragraph_open = False
                 continue
 
+            context = _list_item_context(
+                line, paragraph_open=paragraph_open
+            )
+            if (
+                context is not None
+                and not paragraph_open
+                and _leading_columns(context[1]) >= 4
+            ):
+                list_content_column = content_column
+                paragraph_open = False
+                index += 1
+                continue
+
             rendered.append(line)
             list_content_column = content_column
             paragraph_open = _list_item_starts_paragraph(line)
@@ -1207,6 +1404,87 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
         index += 1
 
     return tuple(rendered)
+
+def _matching_inline_link_end(text: str, open_index: int) -> int | None:
+    depth = 0
+    quote: str | None = None
+    cursor = open_index
+
+    while cursor < len(text):
+        char = text[cursor]
+
+        if char == "\\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
+
+        if quote is not None:
+            if char == quote:
+                quote = None
+            cursor += 1
+            continue
+
+        if char in ('"', "'"):
+            quote = char
+            cursor += 1
+            continue
+
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+
+        cursor += 1
+
+    return None
+
+
+def _render_inline_prose(text: str) -> str:
+    """Approximate rendered inline text, excluding link metadata/titles."""
+    rendered: list[str] = []
+    cursor = 0
+
+    while cursor < len(text):
+        label_start = cursor
+        image = False
+        if text.startswith("![", cursor):
+            image = True
+            label_start = cursor + 1
+
+        if text[label_start:label_start + 1] == "[":
+            close = label_start + 1
+            while close < len(text):
+                if (
+                    text[close] == "]"
+                    and not _is_escaped(text, close)
+                ):
+                    break
+                close += 1
+
+            if close < len(text):
+                label = text[label_start + 1 : close]
+                if close + 1 < len(text) and text[close + 1] == "(":
+                    link_end = _matching_inline_link_end(
+                        text, close + 1
+                    )
+                    if link_end is not None:
+                        rendered.append(label)
+                        cursor = link_end
+                        continue
+
+                if close + 1 < len(text) and text[close + 1] == "[":
+                    ref_close = text.find("]", close + 2)
+                    if ref_close != -1:
+                        rendered.append(label)
+                        cursor = ref_close + 1
+                        continue
+
+        rendered.append(text[cursor])
+        cursor += 1
+
+    return "".join(rendered)
+
 
 def markdown_rendered_prose_text(text: str) -> str:
     lines = markdown_rendered_prose_lines(text)
@@ -1231,7 +1509,7 @@ def markdown_rendered_prose_text(text: str) -> str:
             blocks.append(" ".join(current))
             current = []
 
-        current.append(line.strip(" \t"))
+        current.append(_render_inline_prose(line.strip(" \t")))
 
         if single_line_block:
             blocks.append(" ".join(current))

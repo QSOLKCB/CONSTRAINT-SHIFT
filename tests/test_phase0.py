@@ -1007,6 +1007,118 @@ class Phase0ContractTests(unittest.TestCase):
         )
         self.assertEqual([], module.validate_texts(texts))
 
+    def test_nested_tab_padding_keeps_inner_heading_visible(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "- -\t  ## I14 — Contract changes are explicit",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_blockquote_fence_hides_heading(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n> ~~~\n"
+            "> ## I14 — Contract changes are explicit\n"
+            "> ~~~\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_first_line_list_code_does_not_satisfy_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += "\n-     machine-checkable Phase 0 validator\n"
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_whitespace_only_reference_label_is_not_hidden(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[ ]: /url "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_blockquote_comment_ends_on_dedent(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n> <!--\n"
+            "## I14 — Contract changes are explicit\n"
+            "-->\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_blockquote_reference_definition_is_hidden_metadata(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n> [hidden]: /url "machine-checkable Phase 0 validator"\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_inline_link_title_does_not_satisfy_prose(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            '\n[visible](/url "machine-checkable Phase 0 validator")\n'
+        )
+        errors = module.validate_texts(texts)
+        self.assertIn("roadmap does not require Phase 0 validator", errors)
+
+    def test_multiline_reference_definition_resets_heading_state(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "[hidden]:\n/url\n2. ## I14 — Contract changes are explicit",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
+    def test_raw_html_container_replacement_exposes_heading(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n- <div>\n"
+            "> ## I14 — Contract changes are explicit\n"
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"
