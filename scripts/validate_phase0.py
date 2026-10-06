@@ -158,9 +158,10 @@ def _list_can_interrupt_paragraph(line: str) -> bool:
     return int(match.group("number")) == 1
 
 
-def _list_marker_content_index(
+def _list_marker_content(
     line: str, paragraph_open: bool = False
-) -> int | None:
+) -> tuple[int, str] | None:
+    """Return visual content column and content after one list marker."""
     match = _list_match(line)
     if match is None:
         return None
@@ -170,17 +171,23 @@ def _list_marker_content_index(
 
     spacing_start = match.start("spacing")
     spacing_end = match.end("spacing")
+    marker_end_column = _column_at(line, spacing_start)
     padding_columns = (
-        _column_at(line, spacing_end) - _column_at(line, spacing_start)
+        _column_at(line, spacing_end) - marker_end_column
     )
 
     if padding_columns <= 4:
-        return spacing_end
+        return _column_at(line, spacing_end), line[spacing_end:]
 
-    # With five or more columns of whitespace after a marker, CommonMark
-    # uses one whitespace character as list padding and leaves the rest
-    # as content indentation.
-    return spacing_start + 1
+    # With five or more visual columns after a marker, CommonMark uses
+    # exactly one column as list padding. If that column lies inside a
+    # tab expansion, preserve the tab's remaining visual columns.
+    content_column = marker_end_column + 1
+    content = _strip_columns_prefix(line, content_column)
+    if content is None:
+        return None
+
+    return content_column, content
 
 
 def _list_item_context(
@@ -188,7 +195,7 @@ def _list_item_context(
 ) -> tuple[int, str] | None:
     """Return (innermost content column, innermost content) for list markers."""
     segment = line
-    offset = 0
+    base_column = 0
     context: tuple[int, str] | None = None
     first_marker = True
 
@@ -196,20 +203,20 @@ def _list_item_context(
         if THEMATIC_BREAK_RE.match(segment):
             return context
 
-        content_index = _list_marker_content_index(
+        marker_content = _list_marker_content(
             segment,
             paragraph_open=paragraph_open if first_marker else False,
         )
-        if content_index is None:
+        if marker_content is None:
             return context
 
-        content = segment[content_index:]
+        local_column, content = marker_content
         if not content.strip(" \t"):
             return context
 
-        offset += content_index
-        context = (_column_at(line, offset), line[offset:])
-        segment = line[offset:]
+        base_column += local_column
+        context = (base_column, content)
+        segment = content
         first_marker = False
 
 def _list_content_column(
@@ -603,6 +610,25 @@ def _raw_html_block_start(
     return None
 
 
+def _raw_html_container_content(
+    line: str, container_column: int
+) -> str | None:
+    """Return content while a container-scoped raw HTML block remains active."""
+    if container_column <= 0:
+        return line
+
+    structural_column, structural_content, _paragraph_open = (
+        _container_content_state(line, paragraph_open=False)
+    )
+    if structural_column >= container_column:
+        return structural_content
+
+    if _leading_columns(line) >= container_column:
+        return _strip_columns_prefix(line, container_column)
+
+    return None
+
+
 def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
     if mode == "blank":
         return not line.strip(" \t")
@@ -696,23 +722,21 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
                 continue
 
         if raw_html_mode is not None:
+            block_line = _raw_html_container_content(
+                code_safe_line, raw_html_container_column
+            )
             if (
                 raw_html_container_column > 0
                 and raw_line.strip(" \t")
-                and _leading_columns(raw_line) < raw_html_container_column
+                and block_line is None
             ):
                 raw_html_mode = None
                 raw_html_terminator = None
                 raw_html_container_column = 0
                 paragraph_open = False
             else:
-                block_line = code_safe_line
-                if raw_html_container_column > 0:
-                    stripped = _strip_columns_prefix(
-                        code_safe_line, raw_html_container_column
-                    )
-                    if stripped is not None:
-                        block_line = stripped
+                if block_line is None:
+                    block_line = code_safe_line
 
                 if _raw_html_block_ends(
                     block_line, raw_html_mode, raw_html_terminator
@@ -776,9 +800,15 @@ def _markdown_visible_records(text: str) -> tuple[tuple[str, bool], ...]:
             continue
 
         records.append((visible_line, paragraph_open))
-        paragraph_open = _paragraph_state_after(
-            visible_line, paragraph_open
-        )
+        if (
+            not paragraph_open
+            and _reference_definition_end((visible_line,), 0) == 1
+        ):
+            paragraph_open = False
+        else:
+            paragraph_open = _paragraph_state_after(
+                visible_line, paragraph_open
+            )
 
     return tuple(records)
 

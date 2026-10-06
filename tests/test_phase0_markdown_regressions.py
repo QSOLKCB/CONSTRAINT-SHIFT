@@ -26,6 +26,7 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             ("ordered-two-does-not-interrupt", f"paragraph\n2. ## {heading}", False),
             ("four-space-padding", f"-    ## {heading}", True),
             ("five-space-padding-is-code", f"-     ## {heading}", False),
+            ("tab-plus-two-spaces-is-code", f"-\t  ## {heading}", False),
         )
 
         for name, markdown, expected in cases:
@@ -73,6 +74,34 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
                     for error in errors
                 )
                 self.assertEqual(should_hide, has_invariant_error)
+
+    def test_blockquote_scoped_html_stays_active(self) -> None:
+        markdown = (
+            "> <div>\n"
+            "> ## I14 — Contract changes are explicit\n"
+            ">\n"
+        )
+        self.assertEqual((), module.markdown_level2_headings(markdown))
+
+    def test_reference_definition_closes_paragraph_state(self) -> None:
+        markdown = (
+            "[hidden]: /url\n"
+            "2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_tab_marker_padding_preserves_visual_indent(self) -> None:
+        context = module._list_item_context(
+            "-\t  ## I14 — Contract changes are explicit"
+        )
+        self.assertIsNotNone(context)
+        assert context is not None
+        content_column, content = context
+        self.assertEqual(2, content_column)
+        self.assertTrue(content.startswith("    ##"))
 
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()

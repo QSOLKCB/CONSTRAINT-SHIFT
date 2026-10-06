@@ -967,6 +967,46 @@ class Phase0ContractTests(unittest.TestCase):
         )
         self.assertEqual([], module.validate_texts(texts))
 
+    def test_tab_marker_padding_keeps_heading_as_code(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "-\t  ## I14 — Contract changes are explicit",
+            1,
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_blockquote_raw_html_hides_nested_heading(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "## Contract changes are explicit",
+            1,
+        )
+        texts["INVARIANTS.md"] += (
+            "\n> <div>\n"
+            "> ## I14 — Contract changes are explicit\n"
+            ">\n"
+        )
+        errors = module.validate_texts(texts)
+        self.assertTrue(
+            any("invariant headings must exactly match" in error for error in errors),
+            errors,
+        )
+
+    def test_reference_definition_does_not_open_heading_paragraph(self) -> None:
+        texts = contract_texts()
+        texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+            "## I14 — Contract changes are explicit",
+            "[hidden]: /url\n2. ## I14 — Contract changes are explicit",
+            1,
+        )
+        self.assertEqual([], module.validate_texts(texts))
+
     def test_roadmap_heading_in_fence_does_not_satisfy_contract(self) -> None:
         texts = contract_texts()
         required = "## Phase 0 — Foundational Research Contract"
