@@ -71,7 +71,7 @@ FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
 THEMATIC_BREAK_RE = re.compile(
-    r"^ {0,3}(?:(?:\\*[ \\t]*){3,}|(?:-[ \\t]*){3,}|(?:_[ \\t]*){3,})$"
+    r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
 )
 RAW_HTML_TYPE1_OPEN_RE = re.compile(
     r"^ {0,3}<(?P<tag>script|pre|style|textarea)(?:[ \t>]|$)",
@@ -130,7 +130,7 @@ def _fence_open(line: str) -> tuple[str, int] | None:
         return marker, 0
 
     list_match = re.match(
-        r"^ {0,3}(?:[-+*]|\\d{1,9}[.)])[ \\t]+"
+        r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+"
         r"(?P<indent> {0,3})(?P<marker>`{3,}|~{3,})(?P<info>.*)$",
         line,
     )
