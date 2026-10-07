@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -250,7 +251,8 @@ def retained_case_coverage(result: dict, frozen_cases: list[dict]) -> bool:
             or any(not case["accepted"] for case in executed[:-1])
             or (0 < count < len(frozen_cases) and executed[-1]["accepted"])):
         return False
-    if result.get("status") == "success" and (count != len(frozen_cases) or not all(case["accepted"] for case in executed)):
+    all_passed = count == len(frozen_cases) and all(case["accepted"] for case in executed)
+    if (result.get("status") == "success") != all_passed:
         return False
     for index, case in enumerate(executed):
         if any(case.get(f"{stream}_file") != f"case-{index:03d}.{stream}.bin" for stream in ("stdout", "stderr")):
@@ -282,12 +284,12 @@ def evidence_entry(path: Path, evidence_id: str, kind: str) -> dict:
 
 def run_harness(languages: list[str], output: Path, sources: Path = SOURCES,
                 timeout: float = 30.0, output_limit: int = 1048576) -> dict:
-    with tempfile.TemporaryDirectory(prefix="constraint-shift-build-") as cache:
-        return _run_harness(languages, output, sources, timeout, output_limit, Path(cache))
+    with tempfile.TemporaryDirectory(prefix="constraint-shift-build-") as cache, ExitStack() as cleanup:
+        return _run_harness(languages, output, sources, timeout, output_limit, Path(cache), cleanup)
 
 
 def _run_harness(languages: list[str], output: Path, sources: Path,
-                 timeout: float, output_limit: int, cache: Path) -> dict:
+                 timeout: float, output_limit: int, cache: Path, cleanup: ExitStack) -> dict:
     if os.name != "posix":
         raise ValueError("Phase 2 currently requires POSIX process groups")
     if not languages or len(languages) != len(set(languages)) or any(l not in ADAPTERS for l in languages):
@@ -300,6 +302,9 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
     cases = load_cases(TASK / "cases.json")
     tools = {language: resolve_tool(language) for language in languages}
     output.mkdir(parents=True, exist_ok=False)
+    # Executables use the operator-selected output filesystem, not system /tmp.
+    execution_root = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
+        prefix="execution-", dir=output)))
     common = output / "contract"
     common.mkdir()
     for name, path in {"TASK.md": TASK / "TASK.md", "cases.json": TASK / "cases.json",
@@ -321,7 +326,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
             snapshot = directory / ADAPTERS[language][1]
             shutil.copyfile(sources / language / ADAPTERS[language][1], snapshot)
             source_snapshots[language] = evidence_entry(snapshot, "source", "input")
-            work = cache / language / "work"
+            work = execution_root / language / "build"
             work.mkdir(parents=True)
             execution_sources[language] = work / snapshot.name
             shutil.copyfile(snapshot, execution_sources[language])
@@ -363,6 +368,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         write_json(directory / "environment.json", env)
         tool = tools[language]
         source = directory / ADAPTERS[language][1]
+        work = execution_root / language / "build"
         result = {"language": language, "version": None, "build": None, "cases": [],
                   "cases_not_run": [c["id"] for c in cases]}
         status, reason = "invalid", "toolchain unavailable"
@@ -370,13 +376,14 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         version = None
         version_status = "error"
         artifact_snapshot = None
+        artifact_bytes, artifact_mode = None, None
         build_command = "build not run"
         if language in source_errors:
             result["source_error"] = source_errors[language]
             reason = "source unavailable"
         else:
             if tool is not None:
-                probe = execute([tool, *ADAPTERS[language][3]], directory, b"", timeout, output_limit, env)
+                probe = execute([tool, *ADAPTERS[language][3]], work, b"", timeout, output_limit, env)
                 result["version"] = save_execution(directory, "version", probe)
                 if probe["status"] == "timeout":
                     status, reason = "timeout", "version probe timed out"
@@ -388,13 +395,16 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                     work = execution_sources[language].parent
                     build_argv, run_argv = commands(language, tool, execution_sources[language], work / "compiled-program")
                     build_command = shlex.join(build_argv)
-                    build = execute(build_argv, directory, b"", timeout, output_limit, env)
+                    build = execute(build_argv, work, b"", timeout, output_limit, env)
                     result["build"] = save_execution(directory, "build", build)
                     if language != "python" and passed(build) and not build["stdout"] and not build["stderr"]:
                         try:
                             shutil.copy2(work / "compiled-program", directory / "program")
                             artifact_snapshot = evidence_entry(directory / "program", "compiled-artifact", "build")
-                            run_argv = [str(work / "execution-program")]
+                            # Keep the input to later execution copies in the parent,
+                            # rather than rereading candidate-accessible snapshot files.
+                            artifact_bytes = (directory / "program").read_bytes()
+                            artifact_mode = (directory / "program").stat().st_mode & 0o777
                         except OSError as exc:
                             build["status"], build["error"] = "error", f"compiled artifact unavailable: {exc}"
                             result["build"] = save_execution(directory, "build", build)
@@ -412,11 +422,16 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                             (directory / f"{name}.input.bin").write_bytes(stdin)
                             (directory / f"{name}.expected.bin").write_bytes(expected)
                             try:
+                                case_work = execution_root / language / name
+                                case_work.mkdir()
                                 if artifact_snapshot is not None:
-                                    # Each case starts from the post-build snapshot, even
-                                    # if an earlier invocation modified its execution copy.
-                                    shutil.copy2(directory / "program", Path(run_argv[0]))
-                                actual = execute(run_argv, directory, stdin, timeout, output_limit, env)
+                                    # Never overwrite an executable a killed descendant
+                                    # might still have mapped: every case gets a new path.
+                                    executable = case_work / "execution-program"
+                                    executable.write_bytes(artifact_bytes)
+                                    executable.chmod(artifact_mode)
+                                    run_argv = [str(executable)]
+                                actual = execute(run_argv, case_work, stdin, timeout, output_limit, env)
                             except OSError as exc:
                                 actual = {"argv": run_argv, "status": "error", "returncode": None,
                                           "stdout": b"", "stderr": b"", "elapsed_ns": 0,

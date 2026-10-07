@@ -82,7 +82,15 @@ retries or post-outcome exclusions.
 Discovered tool paths are made absolute against the caller's working directory,
 including tools found through relative `PATH` components. A compiled artifact
 is copied into evidence and hashed immediately after a successful build. Each
-case executes a fresh disposable copy of that artifact. Missing build artifacts
+case executes a fresh disposable copy from the post-build bytes held by the
+parent harness. Version probes, builds, and cases use disposable working
+directories outside retained evidence directories; a relative write to
+`program` cannot change the retained snapshot. Each case has a unique executable
+path, so a descendant pending termination never forces a later copy to overwrite
+its mapped executable. Execution directories are created on the user-selected
+output filesystem and removed after the run; a system `/tmp` mounted `noexec`
+does not determine where candidates execute. The selected output filesystem
+must permit execution. Missing build artifacts
 or failures preparing execution copies are retained as invalid outcomes.
 
 The default process deadline is 30 seconds, with a shared 1 MiB stdout/stderr
@@ -127,7 +135,8 @@ record, summary, verification statuses, and retained execution outcome,
 frozen acceptance coverage, and every listed evidence file's SHA-256 and byte count.
 Executed case IDs must be the exact frozen prefix in order, with the exact
 remaining suffix listed as not run; execution must stop at the first rejected
-case. A success requires all frozen cases, and each executed case must bind its
+case. Success requires all frozen cases, and complete accepted coverage must
+be reported as success. Each executed case must bind its
 input, expected output, result envelope, stdout, and stderr files as evidence.
 Each record must bind its execution result and required contract snapshots.
 Evidence must resolve

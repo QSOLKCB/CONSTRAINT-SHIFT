@@ -158,6 +158,69 @@ class LanguageHarnessTests(unittest.TestCase):
         self.assertTrue(all(case["argv"][0] != str(self.output / "c/program") for case in self.result("c")["cases"]))
         self.assert_valid_bundle()
 
+    def test_candidate_relative_program_write_does_not_change_retained_artifact(self):
+        marker = self.base / "artifact-sizes.jsonl"
+        code = f"#!{sys.executable}\n" + (harness.SOURCES / "python/main.py").read_text()
+        code += ("\nfrom pathlib import Path\n"
+                 "with open(" + repr(str(marker)) + ", 'a') as sizes:\n"
+                 " sizes.write(str(Path(__file__).stat().st_size) + '\\n')\n"
+                 "with open('program', 'a') as program:\n program.write('# candidate mutation\\n')\n")
+        tool = self.fake_tool("import sys\nfrom pathlib import Path\nif '--version' in sys.argv:\n print('fake C compiler')\nelse:\n target = Path(sys.argv[-1])\n target.write_text(" + repr(code) + ")\n target.chmod(0o755)\n")
+        with patch.object(harness, "resolve_tool", return_value=tool):
+            harness.run_harness(["c"], self.output)
+        self.assertEqual("success", self.record("c")["trial"]["status"])
+        self.assertEqual(code, (self.output / "c/program").read_text())
+        self.assertEqual([str(len(code.encode()))] * 8, marker.read_text().splitlines())
+        self.assertFalse(list(self.output.glob("execution-*")))
+        self.assert_valid_bundle()
+
+    @unittest.skipUnless(harness.resolve_tool("c"), "native C compiler required")
+    def test_native_descendants_never_force_reuse_of_an_execution_path(self):
+        sources = self.base / "native-candidate"
+        (sources / "c").mkdir(parents=True)
+        code = (harness.SOURCES / "c/main.c").read_text()
+        code = "#include <unistd.h>\n" + code.replace("    return 0;", """    fflush(stdout);
+    if (fork() == 0) {
+        close(0); close(1); close(2);
+        sleep(5);
+        _exit(0);
+    }
+    return 0;""")
+        (sources / "c/main.c").write_text(code)
+        for index in range(3):
+            self.output = self.base / f"native-evidence-{index}"
+            harness.run_harness(["c"], self.output, sources)
+            self.assertEqual("success", self.record("c")["trial"]["status"])
+            executables = [case["argv"][0] for case in self.result("c")["cases"]]
+            self.assertEqual(8, len(set(executables)))
+            self.assertTrue(all(Path(path).is_relative_to(self.output) for path in executables))
+            self.assert_valid_bundle()
+
+    @unittest.skipUnless(harness.resolve_tool("c"), "native C compiler required")
+    def test_execution_avoids_a_simulated_noexec_system_temporary_directory(self):
+        noexec = self.base / "system-temp-noexec"
+        noexec.mkdir()
+        execute = harness.execute
+        candidates = []
+
+        def noexec_execute(argv, cwd, *args, **kwargs):
+            if Path(argv[0]).is_relative_to(noexec):
+                raise PermissionError(13, "simulated noexec mount", argv[0])
+            if Path(argv[0]).name == "execution-program":
+                candidates.append((Path(argv[0]), cwd))
+            return execute(argv, cwd, *args, **kwargs)
+
+        with patch.object(harness.tempfile, "tempdir", str(noexec)), patch.object(
+            harness, "execute", side_effect=noexec_execute
+        ):
+            harness.run_harness(["c"], self.output)
+        self.assertEqual("success", self.record("c")["trial"]["status"])
+        self.assertEqual(8, len(candidates))
+        self.assertTrue(all(path.is_relative_to(self.output) and cwd == path.parent for path, cwd in candidates))
+        self.assertFalse(list(noexec.iterdir()))
+        self.assertFalse(list(self.output.glob("execution-*")))
+        self.assert_valid_bundle()
+
     def test_missing_compiled_artifact_is_retained_and_other_languages_continue(self):
         tool = self.fake_tool("import sys\nif '--version' in sys.argv:\n print('fake C compiler')\n")
         real = harness.resolve_tool
@@ -352,6 +415,20 @@ class LanguageHarnessTests(unittest.TestCase):
         summary["trials"][0]["status"] = "failure"
         harness.write_json(self.output / "summary.json", summary)
         self.assertTrue(any("outcome disagrees" in e for e in harness.verify_bundle(self.output)))
+
+    def test_complete_passed_coverage_cannot_be_relabeled_as_unsuccessful(self):
+        harness.run_harness(["python"], self.output)
+        original = json.loads((self.output / "python/result.json").read_text())
+        record = self.record()
+        summary = harness.load_json(self.output / "summary.json")
+        for status in ("failure", "timeout", "invalid"):
+            with self.subTest(status=status):
+                result = json.loads(json.dumps(original))
+                result["status"] = record["trial"]["status"] = summary["trials"][0]["status"] = status
+                result["reason"] = record["trial"]["termination_reason"] = "relabeled complete run"
+                self.update_retained_result(result, record)
+                harness.write_json(self.output / "summary.json", summary)
+                self.assertTrue(any("retained case coverage" in e for e in harness.verify_bundle(self.output)))
 
     def test_same_status_records_cannot_be_swapped_between_adapters(self):
         with patch.object(harness, "resolve_tool", return_value=None):
