@@ -106,7 +106,10 @@ def execute(argv: list[str], cwd: Path, stdin: bytes, timeout: float,
         except BrokenPipeError:
             pass
         finally:
-            child.stdin.close()
+            try:
+                child.stdin.close()
+            except BrokenPipeError:
+                pass
         with selectors.DefaultSelector() as selector:
             for name in buffers:
                 stream = getattr(child, name)

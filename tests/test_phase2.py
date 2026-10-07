@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -68,6 +69,27 @@ class LanguageHarnessTests(unittest.TestCase):
             self.assertNotIn("version", record["toolchain"])
             self.assertEqual(["error", "not_run", "not_run"], [v["status"] for v in record["verification_outcomes"]])
             self.assertEqual(8, len(self.result(language)["cases_not_run"]))
+        self.assert_valid_bundle()
+
+    def test_all_sources_are_frozen_before_the_first_process(self):
+        source = self.sources((harness.SOURCES / "python/main.py").read_text())
+        (source / "go").mkdir()
+        original = (harness.SOURCES / "go/main.go").read_bytes()
+        (source / "go/main.go").write_bytes(original)
+        execute = harness.execute
+        resolve = harness.resolve_tool
+
+        def mutate_live_sources(*args, **kwargs):
+            (source / "python/main.py").write_text("print('changed after selection')\n")
+            (source / "go/main.go").write_text("changed after selection\n")
+            return execute(*args, **kwargs)
+
+        with patch.object(harness, "execute", side_effect=mutate_live_sources), patch.object(
+            harness, "resolve_tool", side_effect=lambda name: None if name == "go" else resolve(name)
+        ):
+            summary = harness.run_harness(["python", "go"], self.output, source)
+        self.assertEqual(["success", "invalid"], [t["status"] for t in summary["trials"]])
+        self.assertEqual(original, (self.output / "go/main.go").read_bytes())
         self.assert_valid_bundle()
 
     def test_missing_source_is_retained(self):
@@ -144,8 +166,17 @@ class LanguageHarnessTests(unittest.TestCase):
         self.assertLess(result["elapsed_ns"], 2_000_000_000)
         pid = int(marker.read_text())
         status = Path(f"/proc/{pid}/status")
-        if status.exists():
-            self.assertIn("Z (zombie)", status.read_text())
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                observed = status.read_text()
+            except FileNotFoundError:
+                break
+            if "Z (zombie)" in observed:
+                break
+            if time.monotonic() >= deadline:
+                self.fail(f"descendant did not terminate after group SIGKILL: {observed}")
+            time.sleep(0.01)
 
     def test_unusable_version_probe_is_invalid(self):
         tool = self.fake_tool("import sys\nprint('broken tool', file=sys.stderr)\nsys.exit(3)\n")
