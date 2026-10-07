@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0.0",
+  "record_type": "constraint-shift-experiment",
+  "record_id": "phase1-example-success",
+  "created_at": "2026-10-07T02:40:00Z",
+  "hypotheses": [
+    "H2"
+  ],
+  "task": {
+    "task_id": "TASK-SCHEMA-001",
+    "title": "Synthetic compile-and-test task",
+    "equivalence_group": "schema-example-001",
+    "specification_ref": "spec",
+    "acceptance_ref": "acceptance"
+  },
+  "agent": {
+    "agent_id": "example-agent",
+    "kind": "ai",
+    "name": "Example AI agent",
+    "provider": "example-provider",
+    "model": "example-model",
+    "version": "example-version",
+    "instructions_ref": "prompt"
+  },
+  "language": {
+    "name": "Python",
+    "version": "3.12",
+    "implementation": "CPython"
+  },
+  "toolchain": {
+    "compiler_or_runtime": "python3",
+    "version": "3.12",
+    "build_flags": [],
+    "dependencies": [],
+    "test_command": "python3 -m unittest",
+    "analysis_tools": []
+  },
+  "environment": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "hardware_summary": "synthetic example; hardware not material"
+  },
+  "predeclared": {
+    "experimental_unit": "one generation attempt",
+    "acceptance_criteria": [
+      "program exits zero",
+      "acceptance test passes"
+    ],
+    "resource_limits": [
+      "one generation",
+      "one verification cycle"
+    ],
+    "stopping_rule": "stop after the first verification cycle",
+    "inclusion_rule": "include every started attempt",
+    "exclusion_rule": "exclude none after start",
+    "invalid_trial_rule": "mark invalid only for harness or fixture corruption",
+    "timeout_rule": "mark timeout if execution exceeds the frozen limit",
+    "missing_data_rule": "retain the trial and mark unavailable measurements as missing in analysis",
+    "primary_denominators": [
+      "all started attempts"
+    ]
+  },
+  "trial": {
+    "trial_id": "trial-001",
+    "attempt": 1,
+    "condition": "machine-actionable feedback enabled",
+    "factors": [
+      {
+        "name": "diagnostic_feedback",
+        "value": "enabled"
+      }
+    ],
+    "started_at": "2026-10-07T02:40:00Z",
+    "ended_at": "2026-10-07T02:40:02Z",
+    "status": "success",
+    "termination_reason": "acceptance criteria satisfied",
+    "measurements": [
+      {
+        "name": "wall_clock",
+        "value": 2,
+        "unit": "seconds"
+      },
+      {
+        "name": "repair_iterations",
+        "value": 0,
+        "unit": "count"
+      }
+    ]
+  },
+  "interventions": [],
+  "verification_outcomes": [
+    {
+      "verifier_id": "acceptance-suite",
+      "kind": "test",
+      "status": "pass",
+      "independent_from_generator": true,
+      "command": "python3 -m unittest",
+      "evidence_refs": [
+        "verification-log"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "spec",
+      "kind": "input",
+      "path": "evidence/example/spec.txt",
+      "sha256": "8153a881c9e3ba05793773bbdfaa02f4fc34df5ae9eb58b4f0d2710bd240df0b",
+      "media_type": "text/plain"
+    },
+    {
+      "evidence_id": "acceptance",
+      "kind": "input",
+      "path": "evidence/example/acceptance.txt",
+      "sha256": "1dcdae8b0c452f07127d90095c95e1afc9249c99b1a403e5d1f24143d99e9b5f",
+      "media_type": "text/plain"
+    },
+    {
+      "evidence_id": "prompt",
+      "kind": "input",
+      "path": "evidence/example/prompt.txt",
+      "sha256": "df3ae820d7cf7a0587b7abb8e7ab215f461db6e615e60870088fe60e90249458",
+      "media_type": "text/plain"
+    },
+    {
+      "evidence_id": "verification-log",
+      "kind": "test",
+      "path": "evidence/example/verification.log",
+      "sha256": "1717904605899b28cad1494016bf1d59012a6b66aca7057e340d192b9bc8922a",
+      "media_type": "text/plain"
+    }
+  ]
+}
