@@ -1,0 +1,35 @@
+name: Phase 1 Experiment Schema
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install pinned Phase 0 dependencies
+        run: python3 -m pip install --require-hashes -r requirements.txt
+
+      - name: Validate Phase 1 experiment schema
+        run: python3 scripts/validate_phase1.py
+
+      - name: Run Phase 1 regression tests
+        run: python3 -m unittest tests.test_phase1 -v
