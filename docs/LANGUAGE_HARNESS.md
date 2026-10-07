@@ -151,7 +151,23 @@ produce controlled verification errors.
 
 Verification checks these bindings and hashes before consuming execution evidence.
 Physical stage envelopes must match their aggregate entries, and retained inputs
-and expected bytes must match the frozen suite. The producer and verifier share
+and expected bytes must match the frozen suite. Version probes must use the plan's
+selected tool and the adapter's exact probe arguments. Build and case argv must
+match the fixed adapter flags and command, including source/artifact path
+relationships for the declared procedure. Absolute argv paths describe the
+original host; these relationships are checked without requiring deleted
+execution directories or the original absolute checkout root to exist. Procedure 1.1.0 requires an output-local
+build copy and a unique case path for every Python source or compiled executable.
+The record's agent version must equal the plan and summary procedure version;
+changing version labels cannot upgrade a shared-source 1.0.0 execution.
+
+Every declared execution environment setting must be present and match in the
+trial's environment snapshot. The plan settings themselves must match the frozen
+procedure (including C locale, UTC, and controlled Go settings). Inherited PATH,
+optional HOME, and temporary Go cache paths remain retained trial-specific values.
+Record toolchain and platform metadata must agree with the selected tool and plan.
+Exactly one `cases_executed` measurement with unit `count` must equal the retained
+case count, including zero-case invalid trials and partial failed runs. The producer and verifier share
 one procedure that recomputes case acceptance from status, exit code, and raw
 stdout/stderr; checks version → build → cases progression; and derives the exact
 trial status and all three verifier statuses. Each harness verifier ID must appear
@@ -209,7 +225,9 @@ runtime failures, resource limits, descendant cleanup, corrupted evidence,
 output preservation, and caller-relative invocation. `test_phase2_review.py`
 retains all eight supplied a8167c5 review gates and adds outcome relabeling,
 raw-versus-envelope disagreement, missing stage bindings, duplicate verifier IDs,
-missing byte counts, and malformed-artifact regressions. The Phase 2 workflow runs
+missing byte counts, malformed-artifact regressions, procedure-version upgrades,
+altered commands for all five adapters, contradictory environment settings, and
+case-count measurements. The Phase 2 workflow runs
 both harness test files.
 
 Passing these cases demonstrates the harness under the retained conditions.

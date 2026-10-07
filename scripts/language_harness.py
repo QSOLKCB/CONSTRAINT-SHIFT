@@ -30,6 +30,11 @@ ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "harness/tasks/bounded-integer-fold"
 SOURCES = ROOT / "harness/implementations"
 VERSION = "1.1.0"
+SUPPORTED_PROCEDURES = ("1.0.0", "1.1.0")
+EXECUTION_ENVIRONMENT = {
+    "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "GOENV": "off", "GOWORK": "off",
+    "GO111MODULE": "off", "GOTOOLCHAIN": "local", "CGO_ENABLED": "0",
+}
 FROZEN_SUITE_SHA256 = "3aaada34b7017e1056f1f4129a24d3d0ab7ca43041f8796421ceb04df850d32d"
 TRUSTED_RECORD_CONTRACTS = {
     "https://github.com/QSOLKCB/CONSTRAINT-SHIFT/schema/v2.0.0/experiment-record.schema.json":
@@ -393,6 +398,88 @@ def commands(language: str, tool: str, source: Path, binary: Path) -> tuple[list
     return [tool, *flags, str(source), "-o", str(binary)], [str(binary)]
 
 
+def validate_retained_commands(language: str, result: dict, plan: dict, directory: Path) -> None:
+    """Check literal adapter commands and the layouts supported by each procedure.
+
+    Execution directories have been removed; compare retained path relationships
+    without requiring them to exist or executing bundled harness code.
+    """
+    tool = plan["tools"][language]
+    version, build = result["version"], result["build"]
+    if version is not None and version["argv"] != [tool, *ADAPTERS[language][3]]:
+        raise ValueError("version argv disagrees with selected tool/frozen adapter command")
+    if build is None:
+        return
+    argv = build["argv"]
+    expected_length = len(commands(language, tool, Path("/source"), Path("/binary"))[0])
+    if len(argv) != expected_length:
+        raise ValueError("build argv disagrees with frozen adapter command")
+    source_token = argv[-1] if language in ("python", "go") else argv[-3]
+    source = Path(source_token)
+    if (not source.is_absolute() or str(source) != source_token or ".." in source.parts
+            or source.name != ADAPTERS[language][1]):
+        raise ValueError("build argv has an invalid execution source path")
+    binary = source.parent / "compiled-program" if language == "python" else Path(
+        argv[-2] if language == "go" else argv[-1])
+    if argv != commands(language, tool, source, binary)[0]:
+        raise ValueError("build argv disagrees with selected tool/frozen adapter command")
+
+    # 1.0.0 supported retained-source, temporary work-copy, and output-local
+    # build-copy layouts. 1.1.0 requires the latter and fresh per-case paths.
+    def retained_location(path: Path, current: Path) -> bool:
+        # Absolute argv paths belong to the original host. Archives may be read
+        # from another checkout while keeping their repository-relative location.
+        relative = current.relative_to(ROOT).parts
+        return path.is_absolute() and bool(relative) and path.parts[-len(relative):] == relative
+
+    execution_root = source.parent.parent.parent
+    modern = (source.parent.name == "build" and source.parent.parent.name == language
+              and retained_location(execution_root.parent, directory.parent)
+              and execution_root.name.startswith("execution-")
+              and len(execution_root.name) > len("execution-"))
+    legacy_retained = retained_location(source, directory / ADAPTERS[language][1])
+    legacy_temporary = (source.parent.name == "work" and source.parent.parent.name == language
+                        and execution_root.name.startswith("constraint-shift-build-"))
+    procedure = plan["harness_version"]
+    if not modern and (procedure == "1.1.0" or not (legacy_retained or legacy_temporary)):
+        raise ValueError("build argv source layout disagrees with retained procedure version")
+    retained_binary = retained_location(binary, directory / "program")
+    if language != "python":
+        if modern:
+            valid_binary = binary == source.parent / "compiled-program"
+        elif legacy_temporary:
+            valid_binary = retained_binary or binary == source.parent / "compiled-program"
+        else:
+            valid_binary = binary == source.parent / "program"
+        if not valid_binary:
+            raise ValueError("build argv artifact path disagrees with frozen adapter layout")
+    for index, case in enumerate(result["cases"]):
+        if language == "python":
+            case_source = (source.parent.parent / f"case-{index:03d}" / source.name
+                           if procedure == "1.1.0" else source)
+            expected = [tool, *ADAPTERS[language][4], str(case_source)]
+        else:
+            executable = (source.parent.parent / f"case-{index:03d}" / "execution-program" if modern else
+                          binary if retained_binary else source.parent / "execution-program")
+            expected = [str(executable)]
+        if case["argv"] != expected:
+            raise ValueError(f"case-{index:03d} argv disagrees with frozen adapter/procedure execution layout")
+
+
+def validate_retained_metadata(language: str, record: dict, result: dict, plan: dict) -> None:
+    if record["agent"].get("version") != plan["harness_version"]:
+        raise ValueError("record procedure version disagrees with retained plan/summary")
+    toolchain = record["toolchain"]
+    if (toolchain["compiler_or_runtime"] != (plan["tools"][language] or ADAPTERS[language][2])
+            or toolchain["build_flags"] != ADAPTERS[language][4]):
+        raise ValueError("record toolchain disagrees with selected tool/frozen adapter command")
+    if record["environment"] != plan.get("environment"):
+        raise ValueError("record environment disagrees with retained plan")
+    counts = [m for m in record["trial"]["measurements"] if m["name"] == "cases_executed"]
+    if len(counts) != 1 or counts[0].get("unit") != "count" or counts[0]["value"] != len(result["cases"]):
+        raise ValueError("cases_executed measurement must uniquely match retained cases with unit count")
+
+
 def evidence_entry(path: Path, evidence_id: str, kind: str) -> dict:
     digest = hashlib.sha256()
     size = 0
@@ -472,9 +559,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
     plan = {"harness_version": VERSION, "task_id": "TASK-FOLD-001", "languages": languages,
             "tools": tools, "predeclared": predeclared,
             "environment": {"os": platform.platform(), "architecture": platform.machine()},
-            "execution_environment": {"LANG": "C", "LC_ALL": "C", "TZ": "UTC",
-                                      "GOENV": "off", "GOWORK": "off", "GO111MODULE": "off",
-                                      "GOTOOLCHAIN": "local", "CGO_ENABLED": "0"}}
+            "execution_environment": dict(EXECUTION_ENVIRONMENT)}
     write_json(common / "plan.json", plan)
     common_files = [(common / "TASK.md", "spec", "input"), (common / "cases.json", "acceptance", "test"),
                     (common / "harness.py", "harness", "input"), (common / "schema.json", "schema", "input"),
@@ -637,8 +722,10 @@ def verify_bundle(output: Path) -> list[str]:
             or any(tool is not None and (not isinstance(tool, str) or not Path(tool).is_absolute() or "\0" in tool)
                    for tool in tools.values())):
         return ["invalid bundle plan tool selection"]
-    if plan.get("harness_version") not in ("1.0.0", VERSION):
+    if plan.get("harness_version") not in SUPPORTED_PROCEDURES:
         return ["unsupported retained harness procedure version"]
+    if plan.get("execution_environment") != EXECUTION_ENVIRONMENT:
+        return ["plan execution environment disagrees with frozen procedure settings"]
     summary = load_json(output / "summary.json")
     if (not isinstance(summary, dict) or not isinstance(summary.get("trials"), list)
             or summary.get("harness_version") != plan["harness_version"]
@@ -729,6 +816,9 @@ def verify_bundle(output: Path) -> list[str]:
             if not isinstance(environment, dict) or any(not isinstance(k, str) or not isinstance(v, str)
                                                        for k, v in environment.items()):
                 raise ValueError("invalid retained execution environment")
+            if any(environment.get(key) != value for key, value in plan["execution_environment"].items()):
+                raise ValueError("retained execution environment disagrees with plan settings")
+            validate_retained_metadata(language, record, result, plan)
             observations = {}
             for name, envelope in execution_stages(result):
                 physical = decode_json(verified[(directory / f"{name}.json").resolve()])
@@ -737,6 +827,7 @@ def verify_bundle(output: Path) -> list[str]:
                     raise ValueError(f"{name}: physical execution envelope disagrees with aggregate result")
                 observations[name] = {**physical, **{stream: verified[(directory / physical[f"{stream}_file"]).resolve()]
                                                    for stream in ("stdout", "stderr")}}
+            validate_retained_commands(language, result, plan, directory)
             for index, case in enumerate(result["cases"]):
                 for suffix, field in (("input", "input"), ("expected", "expected")):
                     actual = verified[(directory / f"case-{index:03d}.{suffix}.bin").resolve()]
