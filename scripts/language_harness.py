@@ -203,6 +203,31 @@ def verification_failure(result: dict) -> str:
     return "error" if result["status"] in ("timeout", "error") else "fail"
 
 
+def retained_verification_statuses(directory: Path, result: dict) -> dict:
+    def streams(execution):
+        contents = []
+        for stream in ("stdout", "stderr"):
+            filename = execution[f"{stream}_file"]
+            if not isinstance(filename, str) or Path(filename).name != filename:
+                raise ValueError("invalid retained stream filename")
+            contents.append((directory / filename).read_bytes())
+        return contents
+
+    version, build, cases = result["version"], result["build"], result["cases"]
+    version_status = "error"
+    if version is not None:
+        if version["status"] == "output_limit":
+            version_status = "fail"
+        elif passed(version) and any(content.strip() for content in streams(version)):
+            version_status = "pass"
+    build_status = "not_run" if build is None else (
+        "pass" if passed(build) and not any(streams(build)) else verification_failure(build))
+    test_status = "not_run" if not cases else (
+        "pass" if all(case["accepted"] for case in cases) and not result["cases_not_run"]
+        else verification_failure(cases[-1]))
+    return {"toolchain-identity": version_status, "build": build_status, "frozen-cases": test_status}
+
+
 def commands(language: str, tool: str, source: Path, binary: Path) -> tuple[list[str], list[str]]:
     flags = ADAPTERS[language][4]
     if language == "python":
@@ -256,13 +281,20 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
     cases = load_cases(common / "cases.json")
     record_validator, schema = retained_record_contract(common)
     source_errors = {}
+    source_snapshots = {}
+    execution_sources = {}
     # Freeze all selected sources before any compiler, version probe, or candidate runs.
     for language in languages:
         directory = output / language
         directory.mkdir()
         try:
-            shutil.copyfile(sources / language / ADAPTERS[language][1],
-                            directory / ADAPTERS[language][1])
+            snapshot = directory / ADAPTERS[language][1]
+            shutil.copyfile(sources / language / ADAPTERS[language][1], snapshot)
+            source_snapshots[language] = evidence_entry(snapshot, "source", "input")
+            work = cache / language / "work"
+            work.mkdir(parents=True)
+            execution_sources[language] = work / snapshot.name
+            shutil.copyfile(snapshot, execution_sources[language])
         except OSError as exc:
             source_errors[language] = str(exc)
     predeclared = {
@@ -288,6 +320,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                     (common / "harness.py", "harness", "input"), (common / "schema.json", "schema", "input"),
                     (common / "validate_phase1.py", "record-validator", "input"),
                     (common / "plan.json", "plan", "environment")]
+    common_evidence = [evidence_entry(p, eid, kind) for p, eid, kind in common_files]
     summary = {"harness_version": VERSION, "trials": []}
     run_id = uuid.uuid4().hex
     for language in languages:
@@ -321,7 +354,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                 elif passed(probe) and (probe["stdout"] or probe["stderr"]).strip():
                     version_status = "pass"
                     version = (probe["stdout"] or probe["stderr"]).decode("utf-8", errors="replace").strip()
-                    build_argv, run_argv = commands(language, tool, source, directory / "program")
+                    build_argv, run_argv = commands(language, tool, execution_sources[language], directory / "program")
                     build_command = shlex.join(build_argv)
                     build = execute(build_argv, directory, b"", timeout, output_limit, env)
                     result["build"] = save_execution(directory, "build", build)
@@ -352,10 +385,12 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                     reason = "toolchain version probe unusable"
         result.update({"status": status, "reason": reason})
         write_json(directory / "result.json", result)
-        files = list(common_files)
-        files += [(p, f"trial-{i}", "input" if p == source else "build" if p.name == "program" else "log")
-                  for i, p in enumerate(sorted(directory.iterdir())) if p.is_file()]
-        evidence = [evidence_entry(p, eid, kind) for p, eid, kind in files]
+        files = [(p, f"trial-{i}", "build" if p.name == "program" else "log")
+                 for i, p in enumerate(sorted(directory.iterdir())) if p.is_file() and p != source]
+        evidence = list(common_evidence)
+        if language in source_snapshots:
+            evidence.append(source_snapshots[language])
+        evidence += [evidence_entry(p, eid, kind) for p, eid, kind in files]
         result_ref = next(e["evidence_id"] for e in evidence if e["path"].endswith(f"/{language}/result.json"))
         record = {
             "schema_version": "2.0.0", "record_type": "constraint-shift-harness-smoke",
@@ -409,6 +444,10 @@ def verify_bundle(output: Path) -> list[str]:
     plan = load_json(output / "contract/plan.json")
     summary = load_json(output / "summary.json")
     languages = plan["languages"]
+    if (not isinstance(languages, list) or not languages
+            or any(not isinstance(language, str) or language not in ADAPTERS for language in languages)
+            or len(languages) != len(set(languages))):
+        raise ValueError("bundle plan must select nonempty unique supported languages")
     if [t["language"] for t in summary["trials"]] != languages:
         errors.append("summary does not retain every selected language in order")
     for language in languages:
@@ -426,6 +465,9 @@ def verify_bundle(output: Path) -> list[str]:
         if (result.get("language") != language or result.get("status") != record["trial"]["status"]
                 or result.get("reason") != record["trial"]["termination_reason"]):
             errors.append(f"{language}: record outcome disagrees with retained execution result")
+        verification_statuses = {v["verifier_id"]: v["status"] for v in record["verification_outcomes"]}
+        if verification_statuses != retained_verification_statuses(output / language, result):
+            errors.append(f"{language}: verification outcomes disagree with retained execution result")
         bound_paths = {(ROOT / e["path"]).resolve() for e in record["evidence"]}
         required_paths = [result_path, *(output / "contract" / name for name in
                           ("TASK.md", "cases.json", "harness.py", "schema.json", "validate_phase1.py", "plan.json"))]

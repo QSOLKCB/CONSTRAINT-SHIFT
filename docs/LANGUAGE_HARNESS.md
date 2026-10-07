@@ -72,7 +72,9 @@ adapters; they are not reported as implemented or silently substituted.
 ## Frozen procedure and outcomes
 
 The task, cases, harness, record validator, schema, all selected sources, and analysis rules are
-copied before any subprocess executes. One version probe and one build are
+copied and hashed before any subprocess executes. Candidates compile and run
+from disposable source copies outside the retained snapshots. Mutations of an
+execution copy do not replace the original evidence. One version probe and one build are
 attempted per selected language. Cases run in declared order and stop at the
 first failure; remaining case IDs are retained as `cases_not_run`. There are no
 retries or post-outcome exclusions.
@@ -104,8 +106,9 @@ inputs, expected bytes, actual stdout/stderr bytes, result decisions, and
 `record.json`. Every selected trial has explicit tool identity, build, and
 behavioural verification outcomes, including evidence-backed `not_run` entries.
 
-`verify` checks record schemas, selected-language retention, adapter/directory
-identity, agreement between record, summary, and retained execution outcome,
+`verify` checks record schemas, a nonempty unique supported plan selection,
+selected-language retention, adapter/directory identity, agreement between
+record, summary, verification statuses, and retained execution outcome,
 frozen acceptance coverage, and every listed evidence file's SHA-256 and byte count.
 Each record must bind its execution result and required contract snapshots.
 Evidence must resolve

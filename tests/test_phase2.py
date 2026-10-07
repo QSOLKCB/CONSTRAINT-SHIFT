@@ -101,6 +101,14 @@ class LanguageHarnessTests(unittest.TestCase):
         self.assertIn("source_error", self.result("c"))
         self.assert_valid_bundle()
 
+    def test_self_modifying_candidate_preserves_original_source_snapshot(self):
+        code = (harness.SOURCES / "python/main.py").read_text()
+        code += "\nwith open(__file__, 'a') as source:\n source.write('# changed execution copy\\n')\n"
+        harness.run_harness(["python"], self.output, self.sources(code))
+        self.assertEqual("success", self.record()["trial"]["status"])
+        self.assertEqual(code, (self.output / "python/main.py").read_text())
+        self.assert_valid_bundle()
+
     def test_compile_failure_preserves_diagnostics_and_continues_other_languages(self):
         tool = self.fake_tool("import sys\nif '--version' in sys.argv:\n print('fake C compiler 1.0')\nelse:\n print('retained compile defect', file=sys.stderr)\n sys.exit(4)\n")
         real = harness.resolve_tool
@@ -207,6 +215,20 @@ class LanguageHarnessTests(unittest.TestCase):
         harness.write_json(path, summary)
         self.assertTrue(any("every selected language" in e for e in harness.verify_bundle(self.output)))
 
+    def test_verification_rejects_empty_duplicate_and_unsupported_plan_selection(self):
+        harness.run_harness(["python"], self.output)
+        path = self.output / "contract/plan.json"
+        plan = harness.load_json(path)
+        summary = harness.load_json(self.output / "summary.json")
+        summary["trials"] = []
+        harness.write_json(self.output / "summary.json", summary)
+        for languages in ([], ["python", "python"], ["unknown"], [1], "python"):
+            with self.subTest(languages=languages):
+                plan["languages"] = languages
+                harness.write_json(path, plan)
+                with self.assertRaisesRegex(ValueError, "nonempty unique supported"):
+                    harness.verify_bundle(self.output)
+
     def test_evidence_cannot_escape_bundle(self):
         harness.run_harness(["python"], self.output)
         record = self.record()
@@ -261,6 +283,13 @@ class LanguageHarnessTests(unittest.TestCase):
         (self.output / "c/record.json").write_bytes(python)
         (self.output / "python/record.json").write_bytes(c)
         self.assertTrue(any("adapter identity" in e for e in harness.verify_bundle(self.output)))
+
+    def test_verification_outcomes_cannot_contradict_retained_execution(self):
+        harness.run_harness(["python"], self.output)
+        record = self.record()
+        record["verification_outcomes"][2]["status"] = "fail"
+        harness.write_json(self.output / "python/record.json", record)
+        self.assertTrue(any("verification outcomes disagree" in e for e in harness.verify_bundle(self.output)))
 
     def test_build_diagnostics_with_zero_exit_are_failures(self):
         tool = self.fake_tool("import sys\nif '--version' in sys.argv:\n print('fake C compiler 1.0')\nelse:\n print('warning', file=sys.stderr)\n")
