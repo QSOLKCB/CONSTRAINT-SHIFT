@@ -47,7 +47,7 @@ Deliverables:
 - [x] C, C++, Rust, Go, and Python reference adapters;
 - [x] isolated working directories, process-group deadlines, and bounded output capture;
 - [x] source/contract snapshots, observed toolchain identity, and retained raw execution evidence;
-- [x] schema `2.0.0` records for successful, failed, timed-out, and invalid/unavailable trials;
+- [x] distinct infrastructure smoke records using the Phase 1 `2.0.0` structure, with no hypothesis observations, for successful, failed, timed-out, and invalid/unavailable trials;
 - [x] physical evidence verification, regression tests, and all-five-adapter CI artifacts.
 
 Exit criterion: the five reference adapters satisfy the same frozen acceptance suite in CI, emitted records and physical evidence verify, and repository tests pass. No hypothesis support is inferred from smoke coverage.

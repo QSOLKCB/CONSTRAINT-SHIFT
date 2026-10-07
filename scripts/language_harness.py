@@ -22,12 +22,21 @@ import tempfile
 import time
 import uuid
 
-from validate_phase1 import load_json, validate_record
+from validate_phase1 import load_json
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "harness/tasks/bounded-integer-fold"
 SOURCES = ROOT / "harness/implementations"
 VERSION = "1.0.0"
+FROZEN_SUITE_SHA256 = "3aaada34b7017e1056f1f4129a24d3d0ab7ca43041f8796421ceb04df850d32d"
+TRUSTED_RECORD_CONTRACTS = {
+    "https://github.com/QSOLKCB/CONSTRAINT-SHIFT/schema/v2.0.0/experiment-record.schema.json":
+        ("6e0bc5adbffc9366bc16971a3c49d320900da3b2e9fe54a5ee70d46eb26b9581",
+         "368a8138f09b63e08d857aeda8ede2459aac4057fc288d4e9e1275b78f9f93ba"),
+    "https://github.com/QSOLKCB/CONSTRAINT-SHIFT/schema/harness-smoke-2.0.0.schema.json":
+        ("2b2260dd9a80ea49d0b59a63b807bb70a3ddf490120dfd4bd3376ab354b2685f",
+         "368a8138f09b63e08d857aeda8ede2459aac4057fc288d4e9e1275b78f9f93ba"),
+}
 ADAPTERS = {
     "c": ("C", "main.c", "gcc", ["--version"], ["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror"]),
     "cpp": ("C++", "main.cpp", "g++", ["--version"], ["-std=c++17", "-O0", "-Wall", "-Wextra", "-Werror"]),
@@ -81,7 +90,29 @@ def load_cases(path: Path) -> list[dict]:
         ids.append(case["id"])
     if len(ids) != len(set(ids)):
         raise ValueError("case IDs must be unique")
+    canonical = json.dumps(suite, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest() != FROZEN_SUITE_SHA256:
+        raise ValueError("frozen suite count, IDs, order, or contents changed without a task version")
     return cases
+
+
+def retained_record_contract(common: Path):
+    """Use retained validation only after matching repository-approved identities.
+
+    Unknown bundled code is never executed. Compile the checked bytes themselves
+    so replacement of a file after the hash check cannot change executed code.
+    """
+    schema_bytes = (common / "schema.json").read_bytes()
+    validator_path = common / "validate_phase1.py"
+    validator_bytes = validator_path.read_bytes()
+    schema = json.loads(schema_bytes)
+    approved = TRUSTED_RECORD_CONTRACTS.get(schema.get("$id"))
+    actual = (hashlib.sha256(schema_bytes).hexdigest(), hashlib.sha256(validator_bytes).hexdigest())
+    if actual != approved:
+        raise ValueError("retained record contract is not a registered trusted schema/validator")
+    namespace = {"__name__": "retained_phase1_validator", "__file__": str(validator_path)}
+    exec(compile(validator_bytes, str(validator_path), "exec"), namespace)
+    return namespace["validate_record"], schema
 
 
 def execute(argv: list[str], cwd: Path, stdin: bytes, timeout: float,
@@ -93,7 +124,7 @@ def execute(argv: list[str], cwd: Path, stdin: bytes, timeout: float,
     try:
         child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 start_new_session=True)
+                                 start_new_session=True, shell=False)
     except OSError as exc:
         result["error"] = str(exc)
         result["elapsed_ns"] = time.monotonic_ns() - started
@@ -168,6 +199,10 @@ def failure_status(result: dict) -> str:
     return {"timeout": "timeout", "error": "invalid"}.get(result["status"], "failure")
 
 
+def verification_failure(result: dict) -> str:
+    return "error" if result["status"] in ("timeout", "error") else "fail"
+
+
 def commands(language: str, tool: str, source: Path, binary: Path) -> tuple[list[str], list[str]]:
     flags = ADAPTERS[language][4]
     if language == "python":
@@ -215,11 +250,11 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
     for name, path in {"TASK.md": TASK / "TASK.md", "cases.json": TASK / "cases.json",
                        "harness.py": Path(__file__),
                        "validate_phase1.py": ROOT / "scripts/validate_phase1.py",
-                       "schema.json": ROOT / "schema/experiment-record.schema.json"}.items():
+                       "schema.json": ROOT / "schema/harness-smoke.schema.json"}.items():
         shutil.copyfile(path, common / name)
     # Read the snapshot used for these trials, not mutable live input files.
     cases = load_cases(common / "cases.json")
-    schema = load_json(common / "schema.json")
+    record_validator, schema = retained_record_contract(common)
     source_errors = {}
     # Freeze all selected sources before any compiler, version probe, or candidate runs.
     for language in languages:
@@ -232,7 +267,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
             source_errors[language] = str(exc)
     predeclared = {
         "experimental_unit": "one reference task-language smoke execution",
-        "acceptance_criteria": ["build succeeds", "all frozen cases match exact stdout, empty stderr, and exit zero"],
+        "acceptance_criteria": ["build exits zero without stdout/stderr diagnostics", "all frozen cases match exact stdout, empty stderr, and exit zero"],
         "resource_limits": [f"{timeout} seconds per process", f"{output_limit} retained stdout+stderr bytes per process"],
         "stopping_rule": "one version probe and build; stop cases at first failure; no repair or retry",
         "inclusion_rule": "retain every selected language, including unavailable toolchains",
@@ -270,6 +305,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         status, reason = "invalid", "toolchain unavailable"
         build_status, test_status = "not_run", "not_run"
         version = None
+        version_status = "error"
         build_command = "build not run"
         if language in source_errors:
             result["source_error"] = source_errors[language]
@@ -280,16 +316,19 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                 result["version"] = save_execution(directory, "version", probe)
                 if probe["status"] == "timeout":
                     status, reason = "timeout", "version probe timed out"
+                elif probe["status"] == "output_limit":
+                    status, reason, version_status = "failure", "version probe exceeded output limit", "fail"
                 elif passed(probe) and (probe["stdout"] or probe["stderr"]).strip():
+                    version_status = "pass"
                     version = (probe["stdout"] or probe["stderr"]).decode("utf-8", errors="replace").strip()
                     build_argv, run_argv = commands(language, tool, source, directory / "program")
                     build_command = shlex.join(build_argv)
                     build = execute(build_argv, directory, b"", timeout, output_limit, env)
                     result["build"] = save_execution(directory, "build", build)
-                    if not passed(build):
+                    if not passed(build) or build["stdout"] or build["stderr"]:
                         status = failure_status(build)
                         reason = "build did not complete successfully"
-                        build_status = "fail" if build["status"] == "completed" else "error"
+                        build_status = verification_failure(build)
                     else:
                         build_status, test_status = "pass", "pass"
                         status, reason = "success", "all frozen acceptance cases passed"
@@ -307,7 +346,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                             if not accepted:
                                 status = failure_status(actual)
                                 reason = f"acceptance case {case['id']} failed"
-                                test_status = "fail" if actual["status"] == "completed" else "error"
+                                test_status = verification_failure(actual)
                                 break
                 else:
                     reason = "toolchain version probe unusable"
@@ -319,8 +358,8 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         evidence = [evidence_entry(p, eid, kind) for p, eid, kind in files]
         result_ref = next(e["evidence_id"] for e in evidence if e["path"].endswith(f"/{language}/result.json"))
         record = {
-            "schema_version": "2.0.0", "record_type": "constraint-shift-experiment",
-            "record_id": f"phase2-{run_id}-{language}", "created_at": now(), "hypotheses": ["H2"],
+            "schema_version": "2.0.0", "record_type": "constraint-shift-harness-smoke",
+            "record_id": f"phase2-{run_id}-{language}", "created_at": now(), "hypotheses": [],
             "task": {"task_id": "TASK-FOLD-001", "title": "Bounded integer fold",
                      "equivalence_group": "bounded-integer-fold-1.0.0", "specification_ref": "spec", "acceptance_ref": "acceptance"},
             "agent": {"agent_id": "phase2-reference-runner", "kind": "scripted", "name": "Phase 2 reference fixture runner", "version": VERSION},
@@ -337,10 +376,10 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                       "termination_reason": reason,
                       "measurements": [{"name": "wall_clock_ns", "value": time.monotonic_ns() - started_ns, "unit": "nanoseconds"},
                                        {"name": "cases_executed", "value": len(result["cases"]), "unit": "count"}],
-                      "notes": ["H2 infrastructure only: no measured generation/repair trial, ranking, or hypothesis-support claim; fixture authorship is outside this execution trial."]},
+                      "notes": ["Infrastructure smoke only: no hypothesis observation, measured generation/repair trial, or ranking; fixture authorship is outside this execution trial."]},
             "interventions": [],
             "verification_outcomes": [
-                {"verifier_id": "toolchain-identity", "kind": "other", "status": "pass" if version else "error",
+                {"verifier_id": "toolchain-identity", "kind": "other", "status": version_status,
                  "independent_from_generator": False, "command": "version probe; see retained argv", "evidence_refs": [result_ref]},
                 {"verifier_id": "build", "kind": "compile", "status": build_status,
                  "independent_from_generator": False, "command": build_command, "evidence_refs": [result_ref]},
@@ -351,7 +390,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         }
         if version:
             record["toolchain"]["version"] = version
-        errors = validate_record(record, schema)
+        errors = record_validator(record, schema)
         if errors:
             raise ValueError("generated record is invalid: " + "; ".join(errors))
         write_json(directory / "record.json", record)
@@ -365,6 +404,8 @@ def verify_bundle(output: Path) -> list[str]:
     errors = []
     output = output.resolve()
     output.relative_to(ROOT)
+    record_validator, schema = retained_record_contract(output / "contract")
+    load_cases(output / "contract/cases.json")
     plan = load_json(output / "contract/plan.json")
     summary = load_json(output / "summary.json")
     languages = plan["languages"]
@@ -374,10 +415,22 @@ def verify_bundle(output: Path) -> list[str]:
         if language not in ADAPTERS:
             raise ValueError("unknown language in bundle")
         record = load_json(output / language / "record.json")
-        record_errors = validate_record(record)
+        record_errors = record_validator(record, schema)
         errors.extend(f"{language}: {e}" for e in record_errors)
         if record_errors:
             continue
+        if record["language"]["name"] != ADAPTERS[language][0] or {"name": "language", "value": language} not in record["trial"]["factors"]:
+            errors.append(f"{language}: record adapter identity disagrees with directory")
+        result_path = output / language / "result.json"
+        result = load_json(result_path)
+        if (result.get("language") != language or result.get("status") != record["trial"]["status"]
+                or result.get("reason") != record["trial"]["termination_reason"]):
+            errors.append(f"{language}: record outcome disagrees with retained execution result")
+        bound_paths = {(ROOT / e["path"]).resolve() for e in record["evidence"]}
+        required_paths = [result_path, *(output / "contract" / name for name in
+                          ("TASK.md", "cases.json", "harness.py", "schema.json", "validate_phase1.py", "plan.json"))]
+        if any(p.resolve() not in bound_paths for p in required_paths):
+            errors.append(f"{language}: record does not bind required execution/contract evidence")
         expected = {"language": language, "status": record["trial"]["status"],
                     "record": f"{language}/record.json"}
         if expected not in summary["trials"]:

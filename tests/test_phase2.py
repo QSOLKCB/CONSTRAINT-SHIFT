@@ -55,6 +55,8 @@ class LanguageHarnessTests(unittest.TestCase):
                 self.assertEqual(8, len(self.result(language)["cases"]))
                 self.assertEqual([], self.result(language)["cases_not_run"])
                 self.assertEqual("scripted", record["agent"]["kind"])
+                self.assertEqual("constraint-shift-harness-smoke", record["record_type"])
+                self.assertEqual([], record["hypotheses"])
                 self.assertTrue(all(not v["independent_from_generator"] for v in record["verification_outcomes"]))
                 contracts.add(tuple(e["sha256"] for e in record["evidence"] if e["evidence_id"] in ("spec", "acceptance")))
         self.assertEqual(1, len(contracts))
@@ -155,6 +157,7 @@ class LanguageHarnessTests(unittest.TestCase):
         harness.run_harness(["python"], self.output, self.sources(code), output_limit=1024)
         self.assertEqual("failure", self.record()["trial"]["status"])
         self.assertEqual("output_limit", self.result()["cases"][0]["status"])
+        self.assertEqual("fail", self.record()["verification_outcomes"][2]["status"])
         self.assertEqual(1024, (self.output / "python/case-000.stdout.bin").stat().st_size)
         self.assert_valid_bundle()
 
@@ -218,6 +221,101 @@ class LanguageHarnessTests(unittest.TestCase):
         harness.write_json(path, suite)
         with self.assertRaisesRegex(ValueError, "oracle disagrees"):
             harness.load_cases(path)
+
+    def test_frozen_suite_rejects_removed_reordered_renamed_or_changed_cases(self):
+        original = harness.load_json(harness.TASK / "cases.json")
+        variants = []
+        for change in ("remove", "reorder", "rename", "input"):
+            suite = json.loads(json.dumps(original))
+            if change == "remove":
+                suite["cases"].pop()
+            elif change == "reorder":
+                suite["cases"].reverse()
+            elif change == "rename":
+                suite["cases"][0]["id"] = "different-empty"
+            else:
+                suite["cases"][0]["input"] = "0\n"
+            variants.append(suite)
+        path = self.base / "changed-cases.json"
+        for suite in variants:
+            with self.subTest(suite=suite):
+                harness.write_json(path, suite)
+                with self.assertRaisesRegex(ValueError, "frozen suite"):
+                    harness.load_cases(path)
+
+    def test_record_and_summary_cannot_contradict_execution_result(self):
+        harness.run_harness(["python"], self.output)
+        record = self.record()
+        record["trial"]["status"] = "failure"
+        harness.write_json(self.output / "python/record.json", record)
+        summary = harness.load_json(self.output / "summary.json")
+        summary["trials"][0]["status"] = "failure"
+        harness.write_json(self.output / "summary.json", summary)
+        self.assertTrue(any("outcome disagrees" in e for e in harness.verify_bundle(self.output)))
+
+    def test_same_status_records_cannot_be_swapped_between_adapters(self):
+        with patch.object(harness, "resolve_tool", return_value=None):
+            harness.run_harness(["c", "python"], self.output)
+        c = (self.output / "c/record.json").read_bytes()
+        python = (self.output / "python/record.json").read_bytes()
+        (self.output / "c/record.json").write_bytes(python)
+        (self.output / "python/record.json").write_bytes(c)
+        self.assertTrue(any("adapter identity" in e for e in harness.verify_bundle(self.output)))
+
+    def test_build_diagnostics_with_zero_exit_are_failures(self):
+        tool = self.fake_tool("import sys\nif '--version' in sys.argv:\n print('fake C compiler 1.0')\nelse:\n print('warning', file=sys.stderr)\n")
+        with patch.object(harness, "resolve_tool", return_value=tool):
+            harness.run_harness(["c"], self.output)
+        self.assertEqual(0, self.result("c")["build"]["returncode"])
+        self.assertEqual("failure", self.record("c")["trial"]["status"])
+        self.assertEqual(["pass", "fail", "not_run"], [v["status"] for v in self.record("c")["verification_outcomes"]])
+        self.assert_valid_bundle()
+
+    def test_version_and_build_output_overflow_are_failures(self):
+        for stage in ("version", "build"):
+            with self.subTest(stage=stage):
+                self.output = self.base / f"overflow-{stage}"
+                body = "import sys, os\nif '--version' in sys.argv:\n "
+                body += "os.write(1, b'x' * 8192)\n" if stage == "version" else "print('fake C compiler 1.0')\n"
+                body += "else:\n os.write(1, b'x' * 8192)\n"
+                tool = self.fake_tool(body)
+                with patch.object(harness, "resolve_tool", return_value=tool):
+                    harness.run_harness(["c"], self.output, output_limit=1024)
+                self.assertEqual("failure", self.record("c")["trial"]["status"])
+                index = 0 if stage == "version" else 1
+                self.assertEqual("fail", self.record("c")["verification_outcomes"][index]["status"])
+                self.assert_valid_bundle()
+
+    def test_retained_contract_survives_incompatible_current_validator(self):
+        harness.run_harness(["python"], self.output)
+        import validate_phase1
+        with patch.object(validate_phase1, "SUPPORTED_SCHEMA_VERSION", "3.0.0"), patch.object(
+            validate_phase1, "validate_record", side_effect=RuntimeError("current contract differs")
+        ):
+            self.assert_valid_bundle()
+
+    def test_unknown_snapshot_code_and_schema_are_rejected_without_execution(self):
+        harness.run_harness(["python"], self.output)
+        path = self.output / "contract/validate_phase1.py"
+        marker = self.base / "must-not-execute"
+        original = path.read_bytes()
+        path.write_text("from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('executed')\n")
+        with self.assertRaisesRegex(ValueError, "registered trusted"):
+            harness.verify_bundle(self.output)
+        self.assertFalse(marker.exists())
+        path.write_bytes(original)
+        schema = harness.load_json(self.output / "contract/schema.json")
+        schema["additionalProperties"] = True
+        harness.write_json(self.output / "contract/schema.json", schema)
+        with self.assertRaisesRegex(ValueError, "registered trusted"):
+            harness.verify_bundle(self.output)
+
+    def test_valid_integers_with_long_zero_padding_match_task(self):
+        data = b"0" * 5000 + b"1\n+" + b"0" * 5000 + b"8\n"
+        result = subprocess.run([sys.executable, str(harness.SOURCES / "python/main.py")],
+                                input=data, capture_output=True, timeout=5)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(b"1 8 64\n", result.stdout)
 
     def test_preflight_rejects_bad_selection_limits_and_outside_output(self):
         for languages, timeout, limit in (([], 1, 100), (["python", "python"], 1, 100), (["java"], 1, 100), (["python"], float("nan"), 100), (["python"], 0, 100), (["python"], 1, 0)):

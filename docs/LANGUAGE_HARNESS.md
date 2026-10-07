@@ -1,8 +1,11 @@
 # Phase 2 — Language Harness
 
 The first harness executes one frozen task contract across C, C++, Rust, Go, and
-Python. It uses the Python standard library and emits Phase 1 schema `2.0.0`
-records with physical SHA-256-bound evidence. Harness version and task version
+Python. It uses the Python standard library and emits infrastructure smoke
+records with physical SHA-256-bound evidence. These reuse the Phase 1 `2.0.0`
+structure under the separate `harness-smoke.schema.json` contract and
+`constraint-shift-harness-smoke` record type, with `hypotheses: []`. The research
+experiment schema remains unchanged. Harness version and task version
 are each `1.0.0`; they are separate from the record schema version.
 
 ## Run
@@ -47,7 +50,9 @@ squares. These bounds avoid language-specific overflow requirements.
 
 Eight frozen cases cover empty input, positive and negative values, zeros,
 numeric bounds, mixed values, maximum count, and balanced maximum count. The
-harness checks the case file against a separate integer oracle before execution.
+harness checks the case file against a separate integer oracle and a registered
+canonical suite digest before execution. Removing, reordering, renaming, or
+replacing even oracle-correct cases requires a new task/suite version.
 Acceptance requires exact ASCII stdout bytes, empty stderr, and exit status zero.
 Invalid-input behaviour is deliberately outside this task's domain.
 
@@ -78,7 +83,10 @@ overflow, including descendants that keep output pipes open. Output overflow
 is a failure with explicitly truncated retained output. A deadline is a timeout;
 missing tools/sources, unusable version identity, or process-start errors are
 invalid; compiler diagnostics, nonzero exits, stderr, and output mismatches are
-failures. No failed result is deleted merely because later languages succeed.
+failures. Build acceptance also requires empty stdout/stderr; a zero-exit build
+with diagnostics is a retained failure. Output-limit results are consistently
+`failure` trials and `fail` verification outcomes, including version probes.
+No failed result is deleted merely because later languages succeed.
 
 The harness uses controlled locale, timezone, and Go settings. It retains the
 exact execution environment it supplies, including the inherited tool search
@@ -96,12 +104,25 @@ inputs, expected bytes, actual stdout/stderr bytes, result decisions, and
 `record.json`. Every selected trial has explicit tool identity, build, and
 behavioural verification outcomes, including evidence-backed `not_run` entries.
 
-`verify` checks record schemas, selected-language retention, summary agreement,
-and every listed evidence file's SHA-256 and byte count. Evidence must resolve
+`verify` checks record schemas, selected-language retention, adapter/directory
+identity, agreement between record, summary, and retained execution outcome,
+frozen acceptance coverage, and every listed evidence file's SHA-256 and byte count.
+Each record must bind its execution result and required contract snapshots.
+Evidence must resolve
 within the bundle. Integrity verification can succeed for a correctly retained
 failed trial. It does not rerun acceptance or authenticate the producer; custody
 and signatures are outside Phase 2. Keep the records and their evidence together
 at the recorded repository-relative location.
+
+Historical validation uses the retained schema and validator bytes, rather than
+silently applying current record rules. Both snapshots must match an explicitly
+registered, repository-approved SHA-256 pair before the validator is loaded.
+The checked bytes are compiled directly; unknown bundled code is rejected
+without execution. New contracts must register new identities and preserve the
+old registrations, including the original experiment-record bundle format.
+
+Smoke records have no linked hypothesis IDs and a distinct record type, so a
+hypothesis-based selection cannot treat reference executions as H2 observations.
 
 The acceptance procedure is external to the candidate program; the records
 conservatively set `independent_from_generator` to false because independent
