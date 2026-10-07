@@ -12,13 +12,15 @@ Phase 1 defines the machine-readable evidence record used by later CONSTRAINT-SH
 
 ## Versioning
 
-Every record declares `schema_version`. Phase 1 begins at `1.0.0`.
+Every record declares `schema_version`. The current Phase 1 contract is `2.0.0`.
 
 - **PATCH**: documentation, fixtures, or validator fixes that do not change valid record meaning.
 - **MINOR**: backward-compatible schema additions whose semantics are explicitly documented.
 - **MAJOR**: incompatible field, interpretation, or required-data changes.
 
 The validator accepts the exact version it implements. Records are never silently upgraded or reinterpreted.
+
+Version `2.0.0` introduces the required nonempty verification-outcome array and the stricter portable-path and timestamp rules. This is a major contract change. The original `1.0.0` schema and validator remain available at commit `46a6b6e37c974c2bb522eada74e094cd44cfb7f0`; use that revision to validate historical records. The current validator reports a version mismatch for `1.0.0`, rather than interpreting it under `2.0.0`. Migration requires explicitly retaining a verification outcome and its evidence (including an evidence-backed `not_run` when appropriate), checking paths and timestamps, and changing the version only after those requirements are satisfied. Do not invent verification results merely to migrate a record.
 
 ## Required record domains
 
@@ -62,7 +64,11 @@ Every record requires at least one verification outcome. Each outcome must retai
 
 `created_at`, `trial.started_at`, and `trial.ended_at` require RFC 3339 syntax: a full calendar date, `T` separator, hours/minutes/seconds, and `Z` or a colon-separated numeric offset. Lowercase `t`/`z` and dot-separated fractional seconds are accepted. Calendar dates and offset ranges are validated; spaces, omitted seconds, compact offsets, and offset seconds are rejected. The validator supports seconds `00`–`59`; leap-second timestamps are not supported.
 
+Trial time ordering compares UTC whole seconds and every fractional digit, without truncating to microseconds. Equivalent fractions with trailing zeros compare equally, and numeric offsets are applied before comparison.
+
 Integer fields follow JSON Schema numeric semantics: `1` and `1.0` both represent an integer. Fractional and non-finite values and booleans are rejected. Minimum bounds and intervention sequence ordering also apply to integral decimal values.
+
+The JSON loader retains decimal and exponent tokens as exact `decimal.Decimal` values. Integer, number, and minimum checks use those values directly, so a token such as `0.99999999999999999` cannot round to an accepted integer. Callers validating JSON records should use `load_json()` to preserve the wire values.
 
 ## Predeclaration
 

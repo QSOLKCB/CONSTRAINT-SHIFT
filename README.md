@@ -31,7 +31,7 @@ Phase 0 defines the research contract:
 Phase 1 defines how experimental work is retained:
 
 - [Experiment schema](docs/EXPERIMENT_SCHEMA.md) — versioning, field semantics, evidence references, failure retention, and validation policy.
-- [`experiment-record.schema.json`](schema/experiment-record.schema.json) — JSON Schema Draft 2020-12 structural contract.
+- [`experiment-record.schema.json`](schema/experiment-record.schema.json) — version `2.0.0` JSON Schema Draft 2020-12 structural contract.
 - [Schema examples](schema/examples/) — successful and explicitly failed trials.
 
 The repository intentionally separates **motivation**, **hypothesis**, **measurement**, **evidence**, and **conclusion**.

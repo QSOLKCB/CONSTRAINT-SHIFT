@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/QSOLKCB/CONSTRAINT-SHIFT/schema/experiment-record.schema.json",
+  "$id": "https://github.com/QSOLKCB/CONSTRAINT-SHIFT/schema/v2.0.0/experiment-record.schema.json",
   "title": "CONSTRAINT-SHIFT experiment record",
-  "description": "Version 1.0.0 machine-readable record for retained CONSTRAINT-SHIFT experimental evidence.",
+  "description": "Version 2.0.0 machine-readable record for retained CONSTRAINT-SHIFT experimental evidence.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -24,7 +24,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0.0"
+      "const": "2.0.0"
     },
     "record_type": {
       "const": "constraint-shift-experiment"

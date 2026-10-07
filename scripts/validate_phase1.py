@@ -10,6 +10,7 @@ ordered intervention sequence, unique factor/measurement names, and time order).
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import json
 import math
 from pathlib import Path
@@ -20,11 +21,11 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schema" / "experiment-record.schema.json"
 EXAMPLE_DIR = ROOT / "schema" / "examples"
-SUPPORTED_SCHEMA_VERSION = "1.0.0"
+SUPPORTED_SCHEMA_VERSION = "2.0.0"
 RFC3339_DATETIME = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt]"
     r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
-    r"(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+    r"(?P<fraction>\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
 )
 
 
@@ -41,11 +42,19 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _decimal_number(value: str) -> Decimal:
+    try:
+        return Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"JSON number cannot be represented exactly: {value}") from exc
+
+
 def load_json(path: Path) -> Any:
     text = path.read_text(encoding="utf-8")
     return json.loads(
         text,
         object_pairs_hook=_no_duplicate_keys,
+        parse_float=_decimal_number,
         parse_constant=lambda value: (_ for _ in ()).throw(
             ValueError(f"non-JSON numeric constant: {value}")
         ),
@@ -61,7 +70,7 @@ def _typename(value: Any) -> str:
         return "string"
     if isinstance(value, int):
         return "integer"
-    if isinstance(value, float):
+    if isinstance(value, (float, Decimal)):
         return "number"
     if isinstance(value, list):
         return "array"
@@ -84,12 +93,18 @@ def _is_type(value: Any, expected: str) -> bool:
             isinstance(value, int) and not isinstance(value, bool)
         ) or (
             isinstance(value, float) and math.isfinite(value) and value.is_integer()
+        ) or (
+            isinstance(value, Decimal)
+            and value.is_finite()
+            and value == value.to_integral_value()
         )
     if expected == "number":
         return (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
+            isinstance(value, int) and not isinstance(value, bool)
+        ) or (
+            isinstance(value, float) and math.isfinite(value)
+        ) or (
+            isinstance(value, Decimal) and value.is_finite()
         )
     return False
 
@@ -112,10 +127,10 @@ def _valid_datetime(value: str) -> bool:
     if RFC3339_DATETIME.fullmatch(value) is None:
         return False
     try:
-        parsed = _parse_datetime(value)
+        _parse_datetime(value)
     except ValueError:
         return False
-    return parsed.tzinfo is not None
+    return True
 
 
 def validate_schema_instance(
@@ -195,7 +210,7 @@ def validate_schema_instance(
             errors.append(f"{path}: expected RFC 3339 date-time")
 
     if (
-        isinstance(value, (int, float))
+        isinstance(value, (int, float, Decimal))
         and not isinstance(value, bool)
         and "minimum" in subschema
         and value < subschema["minimum"]
@@ -205,10 +220,31 @@ def validate_schema_instance(
     return errors
 
 
-def _parse_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(
-        value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+def _parse_datetime(value: str) -> tuple[int, str]:
+    """Return an exact UTC ordering key: whole seconds and decimal fraction.
+
+    Fraction strings without trailing zeros compare in numeric order, including
+    arbitrarily many digits. Neither binary floats nor decimal context rounding
+    participate in the comparison.
+    """
+    match = RFC3339_DATETIME.fullmatch(value)
+    if match is None:
+        raise ValueError("expected RFC 3339 date-time")
+    fraction = match.group("fraction")
+    whole = value
+    if fraction is not None:
+        whole = value[:match.start("fraction")] + value[match.end("fraction"):]
+    parsed = datetime.fromisoformat(
+        whole[:-1] + "+00:00" if whole.endswith(("Z", "z")) else whole
     )
+    offset = parsed.utcoffset()
+    assert offset is not None
+    seconds = (
+        parsed.toordinal() * 86400
+        + parsed.hour * 3600 + parsed.minute * 60 + parsed.second
+        - (offset.days * 86400 + offset.seconds)
+    )
+    return seconds, fraction[1:].rstrip("0") if fraction else ""
 
 
 def validate_semantics(record: dict[str, Any]) -> list[str]:
@@ -315,6 +351,11 @@ def validate_record(
         schema = load_json(SCHEMA_PATH)
     if not isinstance(record, dict):
         return ["$: experiment record must be a JSON object"]
+    if "schema_version" in record and record["schema_version"] != SUPPORTED_SCHEMA_VERSION:
+        return [
+            "$.schema_version: unsupported version; expected "
+            f"{SUPPORTED_SCHEMA_VERSION!r}"
+        ]
 
     errors = validate_schema_instance(record, schema, schema)
     if not errors:

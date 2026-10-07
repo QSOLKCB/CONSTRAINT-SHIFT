@@ -1,4 +1,5 @@
 from pathlib import Path
+from decimal import Decimal, localcontext
 import copy
 import importlib.util
 import json
@@ -36,6 +37,21 @@ class Phase1SchemaTests(unittest.TestCase):
         record["schema_version"] = "1.1.0"
         errors = module.validate_record(record)
         self.assertTrue(any("$.schema_version" in error for error in errors), errors)
+
+    def test_major_contract_identity_and_legacy_version_rejection(self) -> None:
+        schema = module.load_json(module.SCHEMA_PATH)
+        self.assertEqual("2.0.0", module.SUPPORTED_SCHEMA_VERSION)
+        self.assertEqual("2.0.0", schema["properties"]["schema_version"]["const"])
+        self.assertIn("v2.0.0", schema["$id"])
+        for name in ("success.json", "failed-trial.json"):
+            self.assertEqual("2.0.0", example(name)["schema_version"])
+        record = example()
+        record["schema_version"] = "1.0.0"
+        record["verification_outcomes"] = []
+        self.assertEqual(
+            ["$.schema_version: unsupported version; expected '2.0.0'"],
+            module.validate_record(record),
+        )
 
     def test_unknown_top_level_property_is_rejected(self) -> None:
         record = example()
@@ -210,6 +226,92 @@ class Phase1SchemaTests(unittest.TestCase):
             "$.trial: ended_at must not precede started_at",
             module.validate_record(record),
         )
+
+    def test_fractional_time_order_preserves_all_digits(self) -> None:
+        for zone in ("z", "Z", "+00:00", "+10:30", "-04:00"):
+            for low, high in (
+                ("0000001", "0000002"),
+                ("1" + "0" * 80 + "1", "1" + "0" * 80 + "2"),
+                ("01", "1"), ("1", "10000000000000001"),
+            ):
+                with self.subTest(zone=zone, low=low, high=high):
+                    record = example()
+                    record["trial"]["started_at"] = f"2026-10-07T02:40:00.{high}{zone}"
+                    record["trial"]["ended_at"] = f"2026-10-07T02:40:00.{low}{zone}"
+                    # Even a deliberately small decimal context must not round time.
+                    with localcontext() as context:
+                        context.prec = 2
+                        self.assertIn(
+                            "$.trial: ended_at must not precede started_at",
+                            module.validate_record(record),
+                        )
+                        record["trial"]["started_at"], record["trial"]["ended_at"] = (
+                            record["trial"]["ended_at"], record["trial"]["started_at"]
+                        )
+                        self.assertEqual([], module.validate_record(record))
+
+    def test_fractional_time_equivalence_and_offset_rollover(self) -> None:
+        for started, ended in (
+            ("2026-10-07T00:00:00.000000100z", "2026-10-06T20:00:00.0000001-04:00"),
+            ("2026-10-07T02:40:00Z", "2026-10-07T02:40:00.000000000z"),
+            ("2026-10-07T02:40:00.999999999z", "2026-10-07T02:40:01Z"),
+        ):
+            with self.subTest(started=started, ended=ended):
+                record = example()
+                record["trial"]["started_at"] = started
+                record["trial"]["ended_at"] = ended
+                self.assertEqual([], module.validate_record(record))
+        record["trial"]["started_at"] = "2026-10-07T00:00:00.0000002z"
+        record["trial"]["ended_at"] = "2026-10-06T20:00:00.0000001-04:00"
+        self.assertIn(
+            "$.trial: ended_at must not precede started_at",
+            module.validate_record(record),
+        )
+
+    def test_loader_rejects_rounded_fractional_integer_tokens(self) -> None:
+        record = example()
+        record["interventions"] = [{
+            "sequence": 1, "actor": "human", "kind": "manual-edit",
+            "description": "Synthetic intervention", "evidence_refs": ["verification-log"],
+        }]
+        record["evidence"][0]["bytes"] = 1
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "wire.json"
+            for field, target in (
+                ("attempt", "$.trial.attempt"),
+                ("sequence", "$.interventions[0].sequence"),
+                ("bytes", "$.evidence[0].bytes"),
+            ):
+                for token in (
+                    "0.99999999999999999", "1.00000000000000001",
+                    "9.9999999999999999e-1", "9007199254740992.1",
+                    "1e-400",
+                ):
+                    with self.subTest(field=field, token=token):
+                        wire = json.dumps(record).replace(f'"{field}": 1', f'"{field}": {token}')
+                        path.write_text(wire, encoding="utf-8")
+                        loaded = module.load_json(path)
+                        errors = module.validate_record(loaded)
+                        self.assertTrue(any(target in e for e in errors), errors)
+
+    def test_loader_preserves_exact_integral_and_measurement_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "wire.json"
+            for token in ("1.0", "1e0", "10e-1", "9007199254740993.0", "1e400"):
+                with self.subTest(token=token):
+                    wire = json.dumps(example()).replace('"attempt": 1', f'"attempt": {token}')
+                    path.write_text(wire, encoding="utf-8")
+                    loaded = module.load_json(path)
+                    self.assertEqual(Decimal(token), loaded["trial"]["attempt"])
+                    self.assertEqual([], module.validate_record(loaded))
+            record = example()
+            record["trial"]["measurements"][0]["value"] = "EXACT_DECIMAL"
+            token = "0.123456789012345678901234567890123456789"
+            wire = json.dumps(record).replace('"EXACT_DECIMAL"', token)
+            path.write_text(wire, encoding="utf-8")
+            loaded = module.load_json(path)
+            self.assertEqual(Decimal(token), loaded["trial"]["measurements"][0]["value"])
+            self.assertEqual([], module.validate_record(loaded))
 
     def test_integral_json_decimals_are_valid_in_all_integer_fields(self) -> None:
         record = example()
