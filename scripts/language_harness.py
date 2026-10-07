@@ -55,7 +55,9 @@ def write_json(path: Path, value: object) -> None:
 
 
 def resolve_tool(language: str) -> str | None:
-    return sys.executable if language == "python" else shutil.which(ADAPTERS[language][2])
+    tool = sys.executable if language == "python" else shutil.which(ADAPTERS[language][2])
+    # PATH components are relative to the caller, not the trial working directory.
+    return os.path.abspath(tool) if tool else None
 
 
 def load_cases(path: Path) -> list[dict]:
@@ -237,6 +239,25 @@ def retained_verification_statuses(directory: Path, result: dict) -> dict:
     return {"toolchain-identity": version_status, "build": build_status, "frozen-cases": test_status}
 
 
+def retained_case_coverage(result: dict, frozen_cases: list[dict]) -> bool:
+    executed = result.get("cases")
+    if not isinstance(executed, list) or len(executed) > len(frozen_cases):
+        return False
+    count = len(executed)
+    if (any(not isinstance(case, dict) or type(case.get("accepted")) is not bool for case in executed)
+            or [case.get("id") for case in executed] != [case["id"] for case in frozen_cases[:count]]
+            or result.get("cases_not_run") != [case["id"] for case in frozen_cases[count:]]
+            or any(not case["accepted"] for case in executed[:-1])
+            or (0 < count < len(frozen_cases) and executed[-1]["accepted"])):
+        return False
+    if result.get("status") == "success" and (count != len(frozen_cases) or not all(case["accepted"] for case in executed)):
+        return False
+    for index, case in enumerate(executed):
+        if any(case.get(f"{stream}_file") != f"case-{index:03d}.{stream}.bin" for stream in ("stdout", "stderr")):
+            return False
+    return True
+
+
 def commands(language: str, tool: str, source: Path, binary: Path) -> tuple[list[str], list[str]]:
     flags = ADAPTERS[language][4]
     if language == "python":
@@ -348,6 +369,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         build_status, test_status = "not_run", "not_run"
         version = None
         version_status = "error"
+        artifact_snapshot = None
         build_command = "build not run"
         if language in source_errors:
             result["source_error"] = source_errors[language]
@@ -363,10 +385,19 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                 elif passed(probe) and (probe["stdout"] or probe["stderr"]).strip():
                     version_status = "pass"
                     version = (probe["stdout"] or probe["stderr"]).decode("utf-8", errors="replace").strip()
-                    build_argv, run_argv = commands(language, tool, execution_sources[language], directory / "program")
+                    work = execution_sources[language].parent
+                    build_argv, run_argv = commands(language, tool, execution_sources[language], work / "compiled-program")
                     build_command = shlex.join(build_argv)
                     build = execute(build_argv, directory, b"", timeout, output_limit, env)
                     result["build"] = save_execution(directory, "build", build)
+                    if language != "python" and passed(build) and not build["stdout"] and not build["stderr"]:
+                        try:
+                            shutil.copy2(work / "compiled-program", directory / "program")
+                            artifact_snapshot = evidence_entry(directory / "program", "compiled-artifact", "build")
+                            run_argv = [str(work / "execution-program")]
+                        except OSError as exc:
+                            build["status"], build["error"] = "error", f"compiled artifact unavailable: {exc}"
+                            result["build"] = save_execution(directory, "build", build)
                     if not passed(build) or build["stdout"] or build["stderr"]:
                         status = failure_status(build)
                         reason = "build did not complete successfully"
@@ -380,7 +411,16 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                             expected = case["expected"].encode("ascii")
                             (directory / f"{name}.input.bin").write_bytes(stdin)
                             (directory / f"{name}.expected.bin").write_bytes(expected)
-                            actual = execute(run_argv, directory, stdin, timeout, output_limit, env)
+                            try:
+                                if artifact_snapshot is not None:
+                                    # Each case starts from the post-build snapshot, even
+                                    # if an earlier invocation modified its execution copy.
+                                    shutil.copy2(directory / "program", Path(run_argv[0]))
+                                actual = execute(run_argv, directory, stdin, timeout, output_limit, env)
+                            except OSError as exc:
+                                actual = {"argv": run_argv, "status": "error", "returncode": None,
+                                          "stdout": b"", "stderr": b"", "elapsed_ns": 0,
+                                          "error": f"execution copy unavailable: {exc}"}
                             envelope = save_execution(directory, name, actual)
                             accepted = passed(actual) and actual["stdout"] == expected and actual["stderr"] == b""
                             result["cases"].append({"id": case["id"], "accepted": accepted, **envelope})
@@ -395,10 +435,13 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         result.update({"status": status, "reason": reason})
         write_json(directory / "result.json", result)
         files = [(p, f"trial-{i}", "build" if p.name == "program" else "log")
-                 for i, p in enumerate(sorted(directory.iterdir())) if p.is_file() and p != source]
+                 for i, p in enumerate(sorted(directory.iterdir()))
+                 if p.is_file() and p != source and (p.name != "program" or artifact_snapshot is None)]
         evidence = list(common_evidence)
         if language in source_snapshots:
             evidence.append(source_snapshots[language])
+        if artifact_snapshot is not None:
+            evidence.append(artifact_snapshot)
         evidence += [evidence_entry(p, eid, kind) for p, eid, kind in files]
         result_ref = next(e["evidence_id"] for e in evidence if e["path"].endswith(f"/{language}/result.json"))
         record = {
@@ -449,7 +492,7 @@ def verify_bundle(output: Path) -> list[str]:
     output = output.resolve()
     output.relative_to(ROOT)
     record_validator, schema = retained_record_contract(output / "contract")
-    load_cases(output / "contract/cases.json")
+    frozen_cases = load_cases(output / "contract/cases.json")
     plan = load_json(output / "contract/plan.json")
     summary = load_json(output / "summary.json")
     languages = plan["languages"]
@@ -471,6 +514,9 @@ def verify_bundle(output: Path) -> list[str]:
             errors.append(f"{language}: record adapter identity disagrees with directory")
         result_path = output / language / "result.json"
         result = load_json(result_path)
+        if not retained_case_coverage(result, frozen_cases):
+            errors.append(f"{language}: retained case coverage disagrees with frozen suite or stopping rule")
+            continue
         if (result.get("language") != language or result.get("status") != record["trial"]["status"]
                 or result.get("reason") != record["trial"]["termination_reason"]):
             errors.append(f"{language}: record outcome disagrees with retained execution result")
@@ -480,6 +526,13 @@ def verify_bundle(output: Path) -> list[str]:
         bound_paths = {(ROOT / e["path"]).resolve() for e in record["evidence"]}
         required_paths = [result_path, *(output / "contract" / name for name in
                           ("TASK.md", "cases.json", "harness.py", "schema.json", "validate_phase1.py", "plan.json"))]
+        required_paths += [output / language / f"case-{index:03d}.{suffix}"
+                           for index in range(len(result["cases"]))
+                           for suffix in ("json", "input.bin", "expected.bin", "stdout.bin", "stderr.bin")]
+        if "source_error" not in result:
+            required_paths.append(output / language / ADAPTERS[language][1])
+        if language != "python" and verification_statuses.get("build") == "pass":
+            required_paths.append(output / language / "program")
         if any(p.resolve() not in bound_paths for p in required_paths):
             errors.append(f"{language}: record does not bind required execution/contract evidence")
         expected = {"language": language, "status": record["trial"]["status"],

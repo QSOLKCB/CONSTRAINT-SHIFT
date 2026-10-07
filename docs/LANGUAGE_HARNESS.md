@@ -79,6 +79,12 @@ attempted per selected language. Cases run in declared order and stop at the
 first failure; remaining case IDs are retained as `cases_not_run`. There are no
 retries or post-outcome exclusions.
 
+Discovered tool paths are made absolute against the caller's working directory,
+including tools found through relative `PATH` components. A compiled artifact
+is copied into evidence and hashed immediately after a successful build. Each
+case executes a fresh disposable copy of that artifact. Missing build artifacts
+or failures preparing execution copies are retained as invalid outcomes.
+
 The default process deadline is 30 seconds, with a shared 1 MiB stdout/stderr
 capture limit per process. A process group is terminated on timeout or output
 overflow, including descendants that keep output pipes open. Output overflow
@@ -119,6 +125,10 @@ behavioural verification outcomes, including evidence-backed `not_run` entries.
 selected-language retention, adapter/directory identity, agreement between
 record, summary, verification statuses, and retained execution outcome,
 frozen acceptance coverage, and every listed evidence file's SHA-256 and byte count.
+Executed case IDs must be the exact frozen prefix in order, with the exact
+remaining suffix listed as not run; execution must stop at the first rejected
+case. A success requires all frozen cases, and each executed case must bind its
+input, expected output, result envelope, stdout, and stderr files as evidence.
 Each record must bind its execution result and required contract snapshots.
 Evidence must resolve
 within the bundle. Integrity verification can succeed for a correctly retained

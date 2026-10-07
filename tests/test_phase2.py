@@ -42,6 +42,15 @@ class LanguageHarnessTests(unittest.TestCase):
     def assert_valid_bundle(self):
         self.assertEqual([], harness.verify_bundle(self.output))
 
+    def update_retained_result(self, result, record=None, language="python"):
+        path = self.output / language / "result.json"
+        harness.write_json(path, result)
+        record = record if record is not None else self.record(language)
+        for entry in record["evidence"]:
+            if (ROOT / entry["path"]).resolve() == path.resolve():
+                entry.update(harness.evidence_entry(path, entry["evidence_id"], entry["kind"]))
+        harness.write_json(self.output / language / "record.json", record)
+
     def test_every_available_reference_adapter_passes_same_cases(self):
         languages = [name for name in harness.ADAPTERS if harness.resolve_tool(name)]
         self.assertIn("python", languages)
@@ -71,6 +80,30 @@ class LanguageHarnessTests(unittest.TestCase):
             self.assertNotIn("version", record["toolchain"])
             self.assertEqual(["error", "not_run", "not_run"], [v["status"] for v in record["verification_outcomes"]])
             self.assertEqual(8, len(self.result(language)["cases_not_run"]))
+        self.assert_valid_bundle()
+
+    def test_relative_path_tool_is_normalized_before_changing_trial_directory(self):
+        tools = self.base / "tools"
+        tools.mkdir()
+        executable = tools / "gcc"
+        Path(self.fake_tool("import sys\nif '--version' in sys.argv:\n print('relative C compiler')\nelse:\n sys.exit(4)\n")).rename(executable)
+        with patch.dict(os.environ, {"PATH": os.path.relpath(tools)}):
+            self.assertEqual(str(executable), harness.resolve_tool("c"))
+            summary = harness.run_harness(["c", "python"], self.output)
+        self.assertEqual(["failure", "success"], [t["status"] for t in summary["trials"]])
+        self.assertEqual(str(executable), self.result("c")["version"]["argv"][0])
+        self.assert_valid_bundle()
+
+    def test_relative_path_unstartable_tool_is_retained_as_invalid(self):
+        tools = self.base / "tools"
+        tools.mkdir()
+        executable = tools / "gcc"
+        executable.write_text("#!/nonexistent/constraint-shift-interpreter\n")
+        executable.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": os.path.relpath(tools)}):
+            summary = harness.run_harness(["c", "python"], self.output)
+        self.assertEqual(["invalid", "success"], [t["status"] for t in summary["trials"]])
+        self.assertEqual("error", self.result("c")["version"]["status"])
         self.assert_valid_bundle()
 
     def test_all_sources_are_frozen_before_the_first_process(self):
@@ -107,6 +140,31 @@ class LanguageHarnessTests(unittest.TestCase):
         harness.run_harness(["python"], self.output, self.sources(code))
         self.assertEqual("success", self.record()["trial"]["status"])
         self.assertEqual(code, (self.output / "python/main.py").read_text())
+        self.assert_valid_bundle()
+
+    def test_self_modifying_compiled_artifact_preserves_post_build_bytes(self):
+        marker = self.base / "execution-sizes.jsonl"
+        code = f"#!{sys.executable}\n" + (harness.SOURCES / "python/main.py").read_text()
+        code += ("\nfrom pathlib import Path\n"
+                 "with open(" + repr(str(marker)) + ", 'a') as sizes:\n"
+                 " sizes.write(str(Path(__file__).stat().st_size) + '\\n')\n"
+                 "with open(__file__, 'a') as executable:\n executable.write('# mutation\\n')\n")
+        tool = self.fake_tool("import sys\nfrom pathlib import Path\nif '--version' in sys.argv:\n print('fake C compiler')\nelse:\n target = Path(sys.argv[-1])\n target.write_text(" + repr(code) + ")\n target.chmod(0o755)\n")
+        with patch.object(harness, "resolve_tool", return_value=tool):
+            harness.run_harness(["c"], self.output)
+        self.assertEqual("success", self.record("c")["trial"]["status"])
+        self.assertEqual(code, (self.output / "c/program").read_text())
+        self.assertEqual([str(len(code.encode()))] * 8, marker.read_text().splitlines())
+        self.assertTrue(all(case["argv"][0] != str(self.output / "c/program") for case in self.result("c")["cases"]))
+        self.assert_valid_bundle()
+
+    def test_missing_compiled_artifact_is_retained_and_other_languages_continue(self):
+        tool = self.fake_tool("import sys\nif '--version' in sys.argv:\n print('fake C compiler')\n")
+        real = harness.resolve_tool
+        with patch.object(harness, "resolve_tool", side_effect=lambda name: tool if name == "c" else real(name)):
+            summary = harness.run_harness(["c", "python"], self.output)
+        self.assertEqual(["invalid", "success"], [t["status"] for t in summary["trials"]])
+        self.assertIn("compiled artifact unavailable", self.result("c")["build"]["error"])
         self.assert_valid_bundle()
 
     def test_compile_failure_preserves_diagnostics_and_continues_other_languages(self):
@@ -310,6 +368,45 @@ class LanguageHarnessTests(unittest.TestCase):
         record["verification_outcomes"][2]["status"] = "fail"
         harness.write_json(self.output / "python/record.json", record)
         self.assertTrue(any("verification outcomes disagree" in e for e in harness.verify_bundle(self.output)))
+
+    def test_retained_case_coverage_cannot_omit_reorder_duplicate_or_mislabel_cases(self):
+        harness.run_harness(["python"], self.output)
+        original = json.loads((self.output / "python/result.json").read_text())
+        record = self.record()
+        for mutation in ("truncate", "reorder", "duplicate", "not-run", "rename", "early-failure"):
+            with self.subTest(mutation=mutation):
+                result = json.loads(json.dumps(original))
+                if mutation == "truncate":
+                    result["cases"] = result["cases"][:1]
+                elif mutation == "reorder":
+                    result["cases"].reverse()
+                elif mutation == "duplicate":
+                    result["cases"][1] = result["cases"][0]
+                elif mutation == "not-run":
+                    result["cases_not_run"] = [original["cases"][0]["id"]]
+                elif mutation == "rename":
+                    result["cases"][0]["id"] = "different-case"
+                else:
+                    result["cases"][0]["accepted"] = False
+                self.update_retained_result(result, record)
+                self.assertTrue(any("retained case coverage" in e for e in harness.verify_bundle(self.output)))
+        # Exact review reproduction: remove the other seven cases' files and
+        # manifest entries, then update the retained result's digest.
+        result = json.loads(json.dumps(original))
+        result["cases"] = result["cases"][:1]
+        for index in range(1, 8):
+            for path in (self.output / "python").glob(f"case-{index:03d}.*"):
+                path.unlink()
+        record["evidence"] = [e for e in record["evidence"] if (ROOT / e["path"]).exists()]
+        self.update_retained_result(result, record)
+        self.assertTrue(any("retained case coverage" in e for e in harness.verify_bundle(self.output)))
+
+    def test_retained_cases_must_bind_every_case_artifact(self):
+        harness.run_harness(["python"], self.output)
+        record = self.record()
+        record["evidence"] = [e for e in record["evidence"] if not e["path"].endswith("case-007.expected.bin")]
+        harness.write_json(self.output / "python/record.json", record)
+        self.assertTrue(any("required execution/contract evidence" in e for e in harness.verify_bundle(self.output)))
 
     def test_build_diagnostics_with_zero_exit_are_failures(self):
         tool = self.fake_tool("import sys\nif '--version' in sys.argv:\n print('fake C compiler 1.0')\nelse:\n print('warning', file=sys.stderr)\n")
