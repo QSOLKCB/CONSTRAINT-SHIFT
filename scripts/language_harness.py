@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -23,12 +24,12 @@ import tempfile
 import time
 import uuid
 
-from validate_phase1 import load_json
+from validate_phase1 import load_json, _no_duplicate_keys, _decimal_number
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "harness/tasks/bounded-integer-fold"
 SOURCES = ROOT / "harness/implementations"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 FROZEN_SUITE_SHA256 = "3aaada34b7017e1056f1f4129a24d3d0ab7ca43041f8796421ceb04df850d32d"
 TRUSTED_RECORD_CONTRACTS = {
     "https://github.com/QSOLKCB/CONSTRAINT-SHIFT/schema/v2.0.0/experiment-record.schema.json":
@@ -109,7 +110,7 @@ def retained_record_contract(common: Path):
     validator_path = common / "validate_phase1.py"
     validator_bytes = validator_path.read_bytes()
     schema = json.loads(schema_bytes)
-    approved = TRUSTED_RECORD_CONTRACTS.get(schema.get("$id"))
+    approved = TRUSTED_RECORD_CONTRACTS.get(schema.get("$id")) if isinstance(schema, dict) else None
     actual = (hashlib.sha256(schema_bytes).hexdigest(), hashlib.sha256(validator_bytes).hexdigest())
     if actual != approved:
         raise ValueError("retained record contract is not a registered trusted schema/validator")
@@ -215,29 +216,151 @@ def verification_failure(result: dict) -> str:
     return "error" if result["status"] in ("timeout", "error") else "fail"
 
 
-def retained_verification_statuses(directory: Path, result: dict) -> dict:
-    def streams(execution):
-        contents = []
-        for stream in ("stdout", "stderr"):
-            filename = execution[f"{stream}_file"]
-            if not isinstance(filename, str) or Path(filename).name != filename:
-                raise ValueError("invalid retained stream filename")
-            contents.append((directory / filename).read_bytes())
-        return contents
+def version_identity(execution: dict) -> str:
+    """Select the first nonempty stripped stream, preserving both raw streams."""
+    for stream in ("stdout", "stderr"):
+        value = execution[stream].strip()
+        if value:
+            return value.decode("utf-8", errors="replace")
+    return ""
 
-    version, build, cases = result["version"], result["build"], result["cases"]
-    version_status = "error"
-    if version is not None:
-        if version["status"] == "output_limit":
-            version_status = "fail"
-        elif passed(version) and any(content.strip() for content in streams(version)):
-            version_status = "pass"
-    build_status = "not_run" if build is None else (
-        "pass" if passed(build) and not any(streams(build)) else verification_failure(build))
-    test_status = "not_run" if not cases else (
-        "pass" if all(case["accepted"] for case in cases) and not result["cases_not_run"]
-        else verification_failure(cases[-1]))
-    return {"toolchain-identity": version_status, "build": build_status, "frozen-cases": test_status}
+
+def version_accepted(execution: dict) -> bool:
+    return passed(execution) and bool(version_identity(execution))
+
+
+def build_accepted(execution: dict) -> bool:
+    return passed(execution) and not execution["stdout"] and not execution["stderr"]
+
+
+def case_accepted(execution: dict, expected: bytes) -> bool:
+    return passed(execution) and execution["stdout"] == expected and execution["stderr"] == b""
+
+
+def derive_trial(result: dict, observations: dict, frozen_cases: list[dict], tool: str | None) -> tuple:
+    """One procedure for producing and checking stage progression and outcomes.
+
+    Observations contain execution envelopes plus captured raw bytes. Conclusions
+    (including accepted flags) are checked, never used as acceptance evidence.
+    """
+    statuses = {"toolchain-identity": "error", "build": "not_run", "frozen-cases": "not_run"}
+    version, build, executed = result["version"], result["build"], result["cases"]
+
+    def stopped_before_build():
+        if build is not None or executed:
+            raise ValueError("build/cases executed after an unavailable or unusable version probe")
+
+    if "source_error" in result or tool is None:
+        if version is not None:
+            raise ValueError("version probe executed despite missing source/toolchain")
+        stopped_before_build()
+        reason = "source unavailable" if "source_error" in result else "toolchain unavailable"
+        return "invalid", reason, statuses
+    if version is None:
+        raise ValueError("available source/toolchain requires a version probe")
+    probe = observations["version"]
+    if not version_accepted(probe):
+        stopped_before_build()
+        if probe["status"] == "timeout":
+            return "timeout", "version probe timed out", statuses
+        if probe["status"] == "output_limit":
+            statuses["toolchain-identity"] = "fail"
+            return "failure", "version probe exceeded output limit", statuses
+        return "invalid", "toolchain version probe unusable", statuses
+    statuses["toolchain-identity"] = "pass"
+    if build is None:
+        raise ValueError("usable version probe requires a build result")
+    built = observations["build"]
+    if not build_accepted(built):
+        if executed:
+            raise ValueError("cases executed after a rejected build")
+        statuses["build"] = verification_failure(built)
+        return failure_status(built), "build did not complete successfully", statuses
+    statuses["build"] = "pass"
+    if not executed:
+        raise ValueError("accepted build requires frozen case execution")
+    for index, case in enumerate(executed):
+        actual = observations[f"case-{index:03d}"]
+        accepted = case_accepted(actual, frozen_cases[index]["expected"].encode("ascii"))
+        if accepted != case["accepted"]:
+            raise ValueError(f"case {case['id']} accepted flag disagrees with raw execution evidence")
+        if not accepted:
+            if index != len(executed) - 1:
+                raise ValueError("cases executed after the first rejected case")
+            statuses["frozen-cases"] = verification_failure(actual)
+            return failure_status(actual), f"acceptance case {case['id']} failed", statuses
+    if len(executed) != len(frozen_cases) or result["cases_not_run"]:
+        raise ValueError("accepted execution omits frozen cases")
+    statuses["frozen-cases"] = "pass"
+    return "success", "all frozen acceptance cases passed", statuses
+
+
+def integer(value: object) -> bool:
+    return (isinstance(value, int) and not isinstance(value, bool)) or (
+        isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value())
+
+
+def validate_execution(envelope: object, name: str) -> None:
+    required = {"argv", "status", "returncode", "elapsed_ns", "stdout_file", "stderr_file"}
+    if not isinstance(envelope, dict) or not required <= envelope.keys() or envelope.keys() - required - {"error"}:
+        raise ValueError(f"{name}: invalid execution envelope")
+    argv = envelope["argv"]
+    if (not isinstance(argv, list) or not argv
+            or any(not isinstance(a, str) or "\0" in a for a in argv)
+            or not Path(argv[0]).is_absolute()):
+        raise ValueError(f"{name}: invalid retained argv")
+    status, code, elapsed = envelope["status"], envelope["returncode"], envelope["elapsed_ns"]
+    if not isinstance(status, str) or status not in ("completed", "timeout", "error", "output_limit"):
+        raise ValueError(f"{name}: invalid execution status")
+    if (code is not None and not integer(code)) or (status == "completed" and code is None):
+        raise ValueError(f"{name}: invalid execution returncode")
+    if not integer(elapsed) or elapsed < 0:
+        raise ValueError(f"{name}: invalid execution elapsed_ns")
+    if "error" in envelope and not isinstance(envelope["error"], str):
+        raise ValueError(f"{name}: invalid execution error")
+    for stream in ("stdout", "stderr"):
+        if envelope[f"{stream}_file"] != f"{name}.{stream}.bin":
+            raise ValueError(f"{name}: " + ("retained case coverage: " if name.startswith("case-") else "")
+                             + "invalid retained stream filename")
+
+
+def execution_stages(result: dict):
+    for name in ("version", "build"):
+        if result[name] is not None:
+            yield name, result[name]
+    for index, case in enumerate(result["cases"]):
+        yield f"case-{index:03d}", {k: v for k, v in case.items() if k not in ("id", "accepted")}
+
+
+def validate_result(result: object) -> None:
+    required = {"language", "status", "reason", "version", "build", "cases", "cases_not_run"}
+    if not isinstance(result, dict) or not required <= result.keys() or result.keys() - required - {"source_error"}:
+        raise ValueError("invalid retained result object")
+    if not isinstance(result["language"], str):
+        raise ValueError("invalid result language")
+    if not isinstance(result["status"], str) or result["status"] not in ("success", "failure", "timeout", "invalid"):
+        raise ValueError("invalid trial status")
+    if not isinstance(result["reason"], str) or not result["reason"]:
+        raise ValueError("invalid trial reason")
+    if "source_error" in result and (not isinstance(result["source_error"], str) or not result["source_error"]):
+        raise ValueError("invalid source_error")
+    if (not isinstance(result["cases"], list) or not isinstance(result["cases_not_run"], list)
+            or any(not isinstance(item, str) for item in result["cases_not_run"])):
+        raise ValueError("invalid retained case lists")
+    for case in result["cases"]:
+        if not isinstance(case, dict) or not isinstance(case.get("id"), str) or type(case.get("accepted")) is not bool:
+            raise ValueError("invalid retained case object")
+    for name, envelope in execution_stages(result):
+        validate_execution(envelope, name)
+
+
+def decode_json(data: bytes):
+    return json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicate_keys,
+                      parse_float=_decimal_number, parse_constant=reject_constant)
+
+
+def reject_constant(value: str):
+    raise ValueError(f"non-JSON numeric constant: {value}")
 
 
 def retained_case_coverage(result: dict, frozen_cases: list[dict]) -> bool:
@@ -318,6 +441,7 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
     source_errors = {}
     source_snapshots = {}
     execution_sources = {}
+    source_bytes = {}
     # Freeze all selected sources before any compiler, version probe, or candidate runs.
     for language in languages:
         directory = output / language
@@ -326,10 +450,11 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
             snapshot = directory / ADAPTERS[language][1]
             shutil.copyfile(sources / language / ADAPTERS[language][1], snapshot)
             source_snapshots[language] = evidence_entry(snapshot, "source", "input")
+            source_bytes[language] = snapshot.read_bytes()
             work = execution_root / language / "build"
             work.mkdir(parents=True)
             execution_sources[language] = work / snapshot.name
-            shutil.copyfile(snapshot, execution_sources[language])
+            execution_sources[language].write_bytes(source_bytes[language])
         except OSError as exc:
             source_errors[language] = str(exc)
     predeclared = {
@@ -371,33 +496,26 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
         work = execution_root / language / "build"
         result = {"language": language, "version": None, "build": None, "cases": [],
                   "cases_not_run": [c["id"] for c in cases]}
-        status, reason = "invalid", "toolchain unavailable"
-        build_status, test_status = "not_run", "not_run"
+        observations = {}
         version = None
-        version_status = "error"
         artifact_snapshot = None
         artifact_bytes, artifact_mode = None, None
         build_command = "build not run"
         if language in source_errors:
             result["source_error"] = source_errors[language]
-            reason = "source unavailable"
         else:
             if tool is not None:
                 probe = execute([tool, *ADAPTERS[language][3]], work, b"", timeout, output_limit, env)
                 result["version"] = save_execution(directory, "version", probe)
-                if probe["status"] == "timeout":
-                    status, reason = "timeout", "version probe timed out"
-                elif probe["status"] == "output_limit":
-                    status, reason, version_status = "failure", "version probe exceeded output limit", "fail"
-                elif passed(probe) and (probe["stdout"] or probe["stderr"]).strip():
-                    version_status = "pass"
-                    version = (probe["stdout"] or probe["stderr"]).decode("utf-8", errors="replace").strip()
+                observations["version"] = probe
+                if version_accepted(probe):
+                    version = version_identity(probe)
                     work = execution_sources[language].parent
                     build_argv, run_argv = commands(language, tool, execution_sources[language], work / "compiled-program")
                     build_command = shlex.join(build_argv)
                     build = execute(build_argv, work, b"", timeout, output_limit, env)
                     result["build"] = save_execution(directory, "build", build)
-                    if language != "python" and passed(build) and not build["stdout"] and not build["stderr"]:
+                    if language != "python" and build_accepted(build):
                         try:
                             shutil.copy2(work / "compiled-program", directory / "program")
                             artifact_snapshot = evidence_entry(directory / "program", "compiled-artifact", "build")
@@ -408,13 +526,8 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                         except OSError as exc:
                             build["status"], build["error"] = "error", f"compiled artifact unavailable: {exc}"
                             result["build"] = save_execution(directory, "build", build)
-                    if not passed(build) or build["stdout"] or build["stderr"]:
-                        status = failure_status(build)
-                        reason = "build did not complete successfully"
-                        build_status = verification_failure(build)
-                    else:
-                        build_status, test_status = "pass", "pass"
-                        status, reason = "success", "all frozen acceptance cases passed"
+                    observations["build"] = build
+                    if build_accepted(build):
                         for index, case in enumerate(cases):
                             name = f"case-{index:03d}"
                             stdin = case["input"].encode("ascii")
@@ -423,30 +536,33 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                             (directory / f"{name}.expected.bin").write_bytes(expected)
                             try:
                                 case_work = execution_root / language / name
+                                executable = case_work / "execution-program"
+                                case_source = case_work / ADAPTERS[language][1]
+                                run_argv = ([str(executable)] if artifact_snapshot is not None else
+                                            [tool, *ADAPTERS[language][4], str(case_source)])
                                 case_work.mkdir()
                                 if artifact_snapshot is not None:
                                     # Never overwrite an executable a killed descendant
                                     # might still have mapped: every case gets a new path.
-                                    executable = case_work / "execution-program"
                                     executable.write_bytes(artifact_bytes)
                                     executable.chmod(artifact_mode)
-                                    run_argv = [str(executable)]
+                                else:
+                                    # Restore the original Python bytes for every case;
+                                    # a candidate may modify only its disposable copy.
+                                    case_source.write_bytes(source_bytes[language])
                                 actual = execute(run_argv, case_work, stdin, timeout, output_limit, env)
                             except OSError as exc:
                                 actual = {"argv": run_argv, "status": "error", "returncode": None,
                                           "stdout": b"", "stderr": b"", "elapsed_ns": 0,
                                           "error": f"execution copy unavailable: {exc}"}
                             envelope = save_execution(directory, name, actual)
-                            accepted = passed(actual) and actual["stdout"] == expected and actual["stderr"] == b""
+                            observations[name] = actual
+                            accepted = case_accepted(actual, expected)
                             result["cases"].append({"id": case["id"], "accepted": accepted, **envelope})
                             result["cases_not_run"].remove(case["id"])
                             if not accepted:
-                                status = failure_status(actual)
-                                reason = f"acceptance case {case['id']} failed"
-                                test_status = verification_failure(actual)
                                 break
-                else:
-                    reason = "toolchain version probe unusable"
+        status, reason, verification_statuses = derive_trial(result, observations, cases, tool)
         result.update({"status": status, "reason": reason})
         write_json(directory / "result.json", result)
         files = [(p, f"trial-{i}", "build" if p.name == "program" else "log")
@@ -481,11 +597,11 @@ def _run_harness(languages: list[str], output: Path, sources: Path,
                       "notes": ["Infrastructure smoke only: no hypothesis observation, measured generation/repair trial, or ranking; fixture authorship is outside this execution trial."]},
             "interventions": [],
             "verification_outcomes": [
-                {"verifier_id": "toolchain-identity", "kind": "other", "status": version_status,
+                {"verifier_id": "toolchain-identity", "kind": "other", "status": verification_statuses["toolchain-identity"],
                  "independent_from_generator": False, "command": "version probe; see retained argv", "evidence_refs": [result_ref]},
-                {"verifier_id": "build", "kind": "compile", "status": build_status,
+                {"verifier_id": "build", "kind": "compile", "status": verification_statuses["build"],
                  "independent_from_generator": False, "command": build_command, "evidence_refs": [result_ref]},
-                {"verifier_id": "frozen-cases", "kind": "behavioural", "status": test_status,
+                {"verifier_id": "frozen-cases", "kind": "behavioural", "status": verification_statuses["frozen-cases"],
                  "independent_from_generator": False, "command": "exact stdout, empty stderr, exit zero; see retained argv",
                  "evidence_refs": ["acceptance", result_ref]},
             ], "evidence": evidence,
@@ -509,63 +625,136 @@ def verify_bundle(output: Path) -> list[str]:
     record_validator, schema = retained_record_contract(output / "contract")
     frozen_cases = load_cases(output / "contract/cases.json")
     plan = load_json(output / "contract/plan.json")
-    summary = load_json(output / "summary.json")
-    languages = plan["languages"]
+    if not isinstance(plan, dict):
+        return ["invalid bundle plan object"]
+    languages = plan.get("languages")
     if (not isinstance(languages, list) or not languages
             or any(not isinstance(language, str) or language not in ADAPTERS for language in languages)
             or len(languages) != len(set(languages))):
         raise ValueError("bundle plan must select nonempty unique supported languages")
+    tools = plan.get("tools")
+    if (not isinstance(tools, dict) or set(tools) != set(languages)
+            or any(tool is not None and (not isinstance(tool, str) or not Path(tool).is_absolute() or "\0" in tool)
+                   for tool in tools.values())):
+        return ["invalid bundle plan tool selection"]
+    if plan.get("harness_version") not in ("1.0.0", VERSION):
+        return ["unsupported retained harness procedure version"]
+    summary = load_json(output / "summary.json")
+    if (not isinstance(summary, dict) or not isinstance(summary.get("trials"), list)
+            or summary.get("harness_version") != plan["harness_version"]
+            or any(not isinstance(t, dict) or set(t) != {"language", "status", "record"}
+                   or any(not isinstance(t[k], str) for k in t)
+                   for t in summary["trials"])):
+        return ["invalid bundle summary object/trials"]
     if [t["language"] for t in summary["trials"]] != languages:
         errors.append("summary does not retain every selected language in order")
     for language in languages:
-        if language not in ADAPTERS:
-            raise ValueError("unknown language in bundle")
-        record = load_json(output / language / "record.json")
+        directory = output / language
+        try:
+            record = load_json(directory / "record.json")
+        except (OSError, ValueError) as exc:
+            errors.append(f"{language}: invalid retained record: {exc}")
+            continue
         record_errors = record_validator(record, schema)
         errors.extend(f"{language}: {e}" for e in record_errors)
         if record_errors:
             continue
         if record["language"]["name"] != ADAPTERS[language][0] or {"name": "language", "value": language} not in record["trial"]["factors"]:
             errors.append(f"{language}: record adapter identity disagrees with directory")
-        result_path = output / language / "result.json"
-        result = load_json(result_path)
+        result_path = directory / "result.json"
+        try:
+            result = load_json(result_path)
+            validate_result(result)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{language}: invalid retained result: {exc}")
+            continue
         if not retained_case_coverage(result, frozen_cases):
             errors.append(f"{language}: retained case coverage disagrees with frozen suite or stopping rule")
             continue
-        if (result.get("language") != language or result.get("status") != record["trial"]["status"]
-                or result.get("reason") != record["trial"]["termination_reason"]):
+        if (result["language"] != language or result["status"] != record["trial"]["status"]
+                or result["reason"] != record["trial"]["termination_reason"]):
             errors.append(f"{language}: record outcome disagrees with retained execution result")
-        verification_statuses = {v["verifier_id"]: v["status"] for v in record["verification_outcomes"]}
-        if verification_statuses != retained_verification_statuses(output / language, result):
-            errors.append(f"{language}: verification outcomes disagree with retained execution result")
-        bound_paths = {(ROOT / e["path"]).resolve() for e in record["evidence"]}
-        required_paths = [result_path, *(output / "contract" / name for name in
-                          ("TASK.md", "cases.json", "harness.py", "schema.json", "validate_phase1.py", "plan.json"))]
-        required_paths += [output / language / f"case-{index:03d}.{suffix}"
-                           for index in range(len(result["cases"]))
-                           for suffix in ("json", "input.bin", "expected.bin", "stdout.bin", "stderr.bin")]
-        if "source_error" not in result:
-            required_paths.append(output / language / ADAPTERS[language][1])
-        if language != "python" and verification_statuses.get("build") == "pass":
-            required_paths.append(output / language / "program")
-        if any(p.resolve() not in bound_paths for p in required_paths):
-            errors.append(f"{language}: record does not bind required execution/contract evidence")
+        verifiers = record["verification_outcomes"]
+        expected_ids = {"toolchain-identity", "build", "frozen-cases"}
+        if len(verifiers) != len(expected_ids) or {v["verifier_id"] for v in verifiers} != expected_ids:
+            errors.append(f"{language}: verification outcomes require exactly one of each harness verifier ID")
+        verification_statuses = {v["verifier_id"]: v["status"] for v in verifiers}
         expected = {"language": language, "status": record["trial"]["status"],
                     "record": f"{language}/record.json"}
         if expected not in summary["trials"]:
             errors.append(f"{language}: summary disagrees with retained record")
-        for evidence in record.get("evidence", []):
+
+        # Bind and check every physical artifact before using it to infer outcomes.
+        required_paths = [result_path, directory / "environment.json", *(output / "contract" / name for name in
+                          ("TASK.md", "cases.json", "harness.py", "schema.json", "validate_phase1.py", "plan.json"))]
+        required_paths += [directory / f"{name}.{suffix}" for name, _ in execution_stages(result)
+                           for suffix in ("json", "stdout.bin", "stderr.bin")]
+        required_paths += [directory / f"case-{index:03d}.{suffix}" for index in range(len(result["cases"]))
+                           for suffix in ("input.bin", "expected.bin")]
+        if "source_error" not in result:
+            required_paths.append(directory / ADAPTERS[language][1])
+        verified = {}
+        integrity_errors = []
+        for evidence in record["evidence"]:
             path = (ROOT / evidence["path"]).resolve()
             if not path.is_relative_to(output):
-                errors.append(f"{language}: evidence escapes bundle")
+                integrity_errors.append(f"{language}: evidence escapes bundle")
+                continue
+            if "bytes" not in evidence:
+                integrity_errors.append(f"{language}: missing evidence byte count: {evidence['path']}")
+                continue
+            if path in verified:
+                integrity_errors.append(f"{language}: duplicate evidence path: {evidence['path']}")
                 continue
             try:
-                actual = evidence_entry(path, evidence["evidence_id"], evidence["kind"])
+                contents = path.read_bytes()
             except OSError as exc:
-                errors.append(f"{language}: missing evidence: {exc}")
+                integrity_errors.append(f"{language}: missing evidence: {exc}")
                 continue
-            if actual["sha256"] != evidence["sha256"] or actual["bytes"] != evidence["bytes"]:
-                errors.append(f"{language}: evidence digest/size mismatch: {evidence['path']}")
+            if hashlib.sha256(contents).hexdigest() != evidence["sha256"] or len(contents) != evidence["bytes"]:
+                integrity_errors.append(f"{language}: evidence digest/size mismatch: {evidence['path']}")
+                continue
+            verified[path] = contents
+        if any(p.resolve() not in verified for p in required_paths):
+            integrity_errors.append(f"{language}: record does not bind required execution/contract evidence")
+        errors.extend(integrity_errors)
+        if integrity_errors:
+            continue
+        try:
+            # Decode exactly the checked bytes; never run candidates during verification.
+            checked_result = decode_json(verified[result_path.resolve()])
+            if checked_result != result or decode_json(verified[(output / "contract/plan.json").resolve()]) != plan:
+                raise ValueError("retained result/plan changed during verification")
+            environment = decode_json(verified[(directory / "environment.json").resolve()])
+            if not isinstance(environment, dict) or any(not isinstance(k, str) or not isinstance(v, str)
+                                                       for k, v in environment.items()):
+                raise ValueError("invalid retained execution environment")
+            observations = {}
+            for name, envelope in execution_stages(result):
+                physical = decode_json(verified[(directory / f"{name}.json").resolve()])
+                validate_execution(physical, name)
+                if physical != envelope:
+                    raise ValueError(f"{name}: physical execution envelope disagrees with aggregate result")
+                observations[name] = {**physical, **{stream: verified[(directory / physical[f"{stream}_file"]).resolve()]
+                                                   for stream in ("stdout", "stderr")}}
+            for index, case in enumerate(result["cases"]):
+                for suffix, field in (("input", "input"), ("expected", "expected")):
+                    actual = verified[(directory / f"case-{index:03d}.{suffix}.bin").resolve()]
+                    if actual != frozen_cases[index][field].encode("ascii"):
+                        raise ValueError(f"case {case['id']}: retained {suffix} differs from frozen suite")
+            if language != "python" and "build" in observations and build_accepted(observations["build"]):
+                if (directory / "program").resolve() not in verified:
+                    raise ValueError("record does not bind required execution/contract evidence: compiled artifact")
+            status, reason, derived_verifiers = derive_trial(result, observations, frozen_cases, tools[language])
+            if result["status"] != status or result["reason"] != reason:
+                raise ValueError("retained outcome disagrees with derived stage outcome")
+            if verification_statuses != derived_verifiers:
+                raise ValueError("verification outcomes disagree with retained execution result")
+            identity = version_identity(observations["version"]) if derived_verifiers["toolchain-identity"] == "pass" else None
+            if record["toolchain"].get("version") != identity:
+                raise ValueError("record toolchain version disagrees with retained version streams")
+        except ValueError as exc:
+            errors.append(f"{language}: {exc}")
     return errors
 
 

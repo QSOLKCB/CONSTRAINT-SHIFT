@@ -30,7 +30,7 @@ jobs:
           ln -s /usr/bin/g++-13 "$RUNNER_TEMP/phase2-tools/g++"
           echo "$RUNNER_TEMP/phase2-tools" >> "$GITHUB_PATH"
       - name: Run harness regressions
-        run: python3 -m unittest discover -s tests -p test_phase2.py -v
+        run: python3 -m unittest discover -s tests -p "test_phase2*.py" -v
       - name: Execute all five reference adapters
         run: python3 scripts/language_harness.py run --languages c cpp rust go python --timeout 60 --output evidence/phase2-ci
       - name: Verify retained records and physical evidence

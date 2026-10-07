@@ -5,8 +5,8 @@ Python. It uses the Python standard library and emits infrastructure smoke
 records with physical SHA-256-bound evidence. These reuse the Phase 1 `2.0.0`
 structure under the separate `harness-smoke.schema.json` contract and
 `constraint-shift-harness-smoke` record type, with `hypotheses: []`. The research
-experiment schema remains unchanged. Harness version and task version
-are each `1.0.0`; they are separate from the record schema version.
+experiment schema remains unchanged. Harness procedure version is `1.1.0`; the task remains `1.0.0` and the record
+schema remains `2.0.0`. These versions identify separate contracts.
 
 ## Run
 
@@ -74,8 +74,11 @@ adapters; they are not reported as implemented or silently substituted.
 The task, cases, harness, record validator, schema, all selected sources, and analysis rules are
 copied and hashed before any subprocess executes. Candidates compile and run
 from disposable source copies outside the retained snapshots. Mutations of an
-execution copy do not replace the original evidence. One version probe and one build are
-attempted per selected language. Cases run in declared order and stop at the
+execution copy do not replace the original evidence. In procedure 1.1.0, original
+Python source bytes are also held by the parent before any subprocess and written
+to a unique disposable file for each case. Syntax checking uses a separate build
+copy. A self-rewriting Python candidate cannot change later cases' implementation.
+One version probe and one build are attempted per selected language. Cases run in declared order and stop at the
 first failure; remaining case IDs are retained as `cases_not_run`. There are no
 retries or post-outcome exclusions.
 
@@ -102,7 +105,9 @@ invalid; compiler diagnostics, nonzero exits, stderr, and output mismatches are
 failures. Build acceptance also requires empty stdout/stderr; a zero-exit build
 with diagnostics is a retained failure. Output-limit results are consistently
 `failure` trials and `fail` verification outcomes, including version probes.
-No failed result is deleted merely because later languages succeed.
+No failed result is deleted merely because later languages succeed. Version identity
+uses the first nonempty stripped stream, checking stdout before stderr; whitespace
+stdout does not hide a useful stderr identity. Both original streams remain retained.
 
 The harness uses controlled locale, timezone, and Go settings. It retains the
 exact execution environment it supplies, including the inherited tool search
@@ -138,11 +143,23 @@ remaining suffix listed as not run; execution must stop at the first rejected
 case. Success requires all frozen cases, and complete accepted coverage must
 be reported as success. Each executed case must bind its
 input, expected output, result envelope, stdout, and stderr files as evidence.
-Each record must bind its execution result and required contract snapshots.
-Evidence must resolve
-within the bundle. Integrity verification can succeed for a correctly retained
-failed trial. It does not rerun acceptance or authenticate the producer; custody
-and signatures are outside Phase 2. Keep the records and their evidence together
+Each record must bind its execution result, environment, required contract snapshots,
+and the envelope and both streams for every executed version, build, and case stage.
+The harness manifest requires a byte count even though the general record schema
+permits omitting it. Missing counts or malformed result, stage, or summary objects
+produce controlled verification errors.
+
+Verification checks these bindings and hashes before consuming execution evidence.
+Physical stage envelopes must match their aggregate entries, and retained inputs
+and expected bytes must match the frozen suite. The producer and verifier share
+one procedure that recomputes case acceptance from status, exit code, and raw
+stdout/stderr; checks version → build → cases progression; and derives the exact
+trial status and all three verifier statuses. Each harness verifier ID must appear
+exactly once. A failed build cannot have executed cases, and a wrong-output failure
+cannot be relabeled as timeout. Evidence must resolve within the bundle. Integrity
+verification can succeed for a correctly retained failed trial. It reads retained
+observations without rerunning candidate programs or authenticating the producer;
+custody and signatures are outside Phase 2. Keep the records and their evidence together
 at the recorded repository-relative location.
 
 Historical validation uses the retained schema and validator bytes, rather than
@@ -151,6 +168,14 @@ registered, repository-approved SHA-256 pair before the validator is loaded.
 The checked bytes are compiled directly; unknown bundled code is rejected
 without execution. New contracts must register new identities and preserve the
 old registrations, including the original experiment-record bundle format.
+
+The reader supports harness procedures 1.0.0 and 1.1.0. Internally consistent
+historical 1.0.0 bundles remain valid under their registered record contract;
+contradictory outcomes or incomplete evidence are rejected with a diagnostic.
+Their files and conclusions are not rewritten. Verification of an older bundle
+does not establish the fresh-per-case Python execution guarantee introduced in
+1.1.0. The task's eight cases, canonical suite digest, record schema, and approved
+schema/validator identities are unchanged.
 
 Smoke records have no linked hypothesis IDs and a distinct record type, so a
 hypothesis-based selection cannot treat reference executions as H2 observations.
@@ -173,7 +198,7 @@ for 30 days even when execution fails. Download artifacts before that expires
 when a run is intended for longer retention.
 
 ```bash
-python3 -m unittest discover -s tests -p test_phase2.py -v
+python3 -m unittest discover -s tests -p "test_phase2*.py" -v
 python3 -m unittest discover -s tests -v
 ```
 
@@ -181,7 +206,11 @@ Reference smoke tests exercise adapters available on the current host; the
 dedicated CI invocation explicitly selects all five and fails when any cannot
 run successfully. The suite also tests missing tools/sources, compilation and
 runtime failures, resource limits, descendant cleanup, corrupted evidence,
-output preservation, and caller-relative invocation.
+output preservation, and caller-relative invocation. `test_phase2_review.py`
+retains all eight supplied a8167c5 review gates and adds outcome relabeling,
+raw-versus-envelope disagreement, missing stage bindings, duplicate verifier IDs,
+missing byte counts, and malformed-artifact regressions. The Phase 2 workflow runs
+both harness test files.
 
 Passing these cases demonstrates the harness under the retained conditions.
 It is not a universal equivalence proof, AI performance experiment, language
