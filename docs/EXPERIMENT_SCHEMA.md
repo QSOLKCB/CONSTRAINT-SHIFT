@@ -42,7 +42,7 @@ Optional metadata should be omitted when unavailable rather than invented. Requi
 
 `task.specification_ref`, `task.acceptance_ref`, optional agent/toolchain references, intervention references, and verification references resolve to `evidence[].evidence_id`.
 
-The repository validator rejects dangling evidence references and duplicate evidence identifiers. Evidence paths are repository-relative and may not traverse through `..`.
+The repository validator rejects dangling evidence references and duplicate evidence identifiers. Evidence paths are repository-relative on both POSIX and Windows: slash-rooted, backslash-rooted, UNC, and drive-prefixed paths (including drive-relative paths such as `C:log.txt`) are rejected. Parent traversal through `..` is rejected with either slash or backslash separators, including mixed separators.
 
 The schema does not assert that a listed path currently has the declared digest. Later execution/archival phases may bind and verify physical evidence files. Phase 1 establishes the record contract and referential integrity.
 
@@ -56,7 +56,13 @@ The supplied `failed-trial.json` fixture must remain a valid record with status 
 
 Each verification outcome records `independent_from_generator`. The field records independence; it does not manufacture it. A generator claiming its own output is correct is not independent verification under I6.
 
-Verification evidence must be retained through at least one evidence reference, including for `not_run` outcomes (for example, a retained log explaining why verification could not run).
+Every record requires at least one verification outcome. Each outcome must retain verification evidence through at least one evidence reference, including for `not_run` outcomes (for example, a retained log explaining why verification could not run). An empty outcome array cannot substitute for an explicit `not_run` result.
+
+## Timestamps and integers
+
+`created_at`, `trial.started_at`, and `trial.ended_at` require RFC 3339 syntax: a full calendar date, `T` separator, hours/minutes/seconds, and `Z` or a colon-separated numeric offset. Lowercase `t`/`z` and dot-separated fractional seconds are accepted. Calendar dates and offset ranges are validated; spaces, omitted seconds, compact offsets, and offset seconds are rejected. The validator supports seconds `00`–`59`; leap-second timestamps are not supported.
+
+Integer fields follow JSON Schema numeric semantics: `1` and `1.0` both represent an integer. Fractional and non-finite values and booleans are rejected. Minimum bounds and intervention sequence ordering also apply to integral decimal values.
 
 ## Predeclaration
 

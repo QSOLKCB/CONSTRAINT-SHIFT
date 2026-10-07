@@ -21,6 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schema" / "experiment-record.schema.json"
 EXAMPLE_DIR = ROOT / "schema" / "examples"
 SUPPORTED_SCHEMA_VERSION = "1.0.0"
+RFC3339_DATETIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt]"
+    r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+    r"(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+)
 
 
 class DuplicateKeyError(ValueError):
@@ -75,7 +80,11 @@ def _is_type(value: Any, expected: str) -> bool:
     if expected == "boolean":
         return isinstance(value, bool)
     if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
+        return (
+            isinstance(value, int) and not isinstance(value, bool)
+        ) or (
+            isinstance(value, float) and math.isfinite(value) and value.is_integer()
+        )
     if expected == "number":
         return (
             isinstance(value, (int, float))
@@ -98,9 +107,12 @@ def _resolve_ref(root_schema: dict[str, Any], ref: str) -> dict[str, Any]:
 
 
 def _valid_datetime(value: str) -> bool:
-    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    # fromisoformat also accepts compact dates, arbitrary separators, omitted
+    # seconds, and non-colon offsets. Check the wire syntax before parsing dates.
+    if RFC3339_DATETIME.fullmatch(value) is None:
+        return False
     try:
-        parsed = datetime.fromisoformat(candidate)
+        parsed = _parse_datetime(value)
     except ValueError:
         return False
     return parsed.tzinfo is not None
@@ -180,7 +192,7 @@ def validate_schema_instance(
         if pattern is not None and re.search(pattern, value) is None:
             errors.append(f"{path}: string does not match required pattern")
         if subschema.get("format") == "date-time" and not _valid_datetime(value):
-            errors.append(f"{path}: expected timezone-aware ISO 8601 date-time")
+            errors.append(f"{path}: expected RFC 3339 date-time")
 
     if (
         isinstance(value, (int, float))
@@ -195,7 +207,7 @@ def validate_schema_instance(
 
 def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(
-        value[:-1] + "+00:00" if value.endswith("Z") else value
+        value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
     )
 
 
@@ -236,7 +248,7 @@ def validate_semantics(record: dict[str, Any]) -> list[str]:
         sequences = [
             item.get("sequence")
             for item in interventions
-            if isinstance(item, dict) and isinstance(item.get("sequence"), int)
+            if isinstance(item, dict) and _is_type(item.get("sequence"), "integer")
         ]
         if sequences and sequences != list(range(1, len(sequences) + 1)):
             errors.append(
@@ -350,10 +362,15 @@ def validate_repo() -> list[str]:
             errors.append(f"{path.relative_to(ROOT)}: {error}")
 
     failed_path = EXAMPLE_DIR / "failed-trial.json"
-    if failed_path.exists():
+    if not failed_path.is_file():
+        errors.append(
+            "schema/examples/failed-trial.json: required failure fixture missing"
+        )
+    else:
         try:
             failed = load_json(failed_path)
-            if failed.get("trial", {}).get("status") != "failure":
+            trial = failed.get("trial") if isinstance(failed, dict) else None
+            if not isinstance(trial, dict) or trial.get("status") != "failure":
                 errors.append(
                     "schema/examples/failed-trial.json must remain an explicit "
                     "retained failure"
