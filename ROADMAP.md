@@ -21,7 +21,21 @@ Deliverables:
 Exit criterion: the Phase 0 validator and test suite pass on the merged default branch.
 
 ## Phase 1 — Experiment Schema
-Define a versioned machine-readable record for tasks, agents, languages, toolchains, trials, interventions, verification outcomes, and retained evidence.
+
+**Status: implemented by the Phase 1 PR**
+
+Deliverables:
+
+- [x] versioned JSON Schema record;
+- [x] task, agent, language, toolchain, environment, and trial metadata;
+- [x] predeclared trial-handling and analysis rules;
+- [x] intervention and verification-outcome records;
+- [x] retained evidence manifest with SHA-256 identities;
+- [x] successful and failed-trial examples;
+- [x] dependency-free structural and semantic validator;
+- [x] regression tests and CI validation.
+
+Exit criterion: the Phase 1 validator accepts the retained examples, the failed-trial example remains a valid explicit failure, and the repository test suite passes.
 
 ## Phase 2 — Language Harness
 Build a minimal multi-language harness for equivalent task execution. Initial candidates may include C, C++, Rust, Go, Python, TypeScript, Java, Ada, Fortran, and COBOL where reproducible toolchains are practical.

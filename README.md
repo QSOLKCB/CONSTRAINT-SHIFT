@@ -28,28 +28,41 @@ Phase 0 defines the research contract:
 - [Invariants](INVARIANTS.md) — non-negotiable research constraints.
 - [Roadmap](ROADMAP.md) — implementation sequence from foundation to archival record.
 
+Phase 1 defines how experimental work is retained:
+
+- [Experiment schema](docs/EXPERIMENT_SCHEMA.md) — versioning, field semantics, evidence references, failure retention, and validation policy.
+- [`experiment-record.schema.json`](schema/experiment-record.schema.json) — version `2.0.0` JSON Schema Draft 2020-12 structural contract.
+- [Schema examples](schema/examples/) — successful and explicitly failed trials.
+
 The repository intentionally separates **motivation**, **hypothesis**, **measurement**, **evidence**, and **conclusion**.
 
-## Phase 0 validation
+## Validation
 
 The foundational contract uses Python 3.12 or 3.14 and a pinned CommonMark parser.
-Install the two hashed runtime dependencies before running the validator or tests:
+Install the hashed Phase 0 dependencies before running the full validation suite:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install --require-hashes -r requirements.txt
 python3 scripts/validate_phase0.py
+python3 scripts/validate_phase1.py
 python3 -m unittest discover -s tests -v
 ```
 
-The validator checks required files, exact ordered hypothesis/invariant/terminology
+The Phase 0 validator checks required files, exact ordered hypothesis/invariant/terminology
 heading inventories, two required prose statements, the Phase 0 roadmap heading,
 and a non-whitespace source-size heuristic. It does not assess the completeness
 of section bodies or establish empirical support for any hypothesis.
 
-[Validation policy](docs/VALIDATION.md) defines eligible headings, decoded prose,
+The Phase 1 validator checks the versioned experiment-record schema, retained examples,
+strict declared fields, evidence references, intervention ordering, time ordering,
+duplicate JSON keys, non-JSON numeric constants, and repository-relative evidence paths.
+A failed trial remains a valid record when it accurately records the failure.
+
+[Phase 0 validation policy](docs/VALIDATION.md) defines eligible headings, decoded prose,
 excluded metadata, parser compatibility corrections, and regression coverage.
+[Phase 1 schema policy](docs/EXPERIMENT_SCHEMA.md) defines record semantics and versioning.
 
 ## Planned experimental flow
 
@@ -77,9 +90,11 @@ supported, weakened, or falsified claim
 
 ## Current status
 
-**Phase 0 — Foundational Research Contract**
+**Phase 1 — Experiment Schema**
 
-No language ranking, legacy-survival claim, modding claim, or social-perception claim is considered established merely because it appears in project motivation. Empirical phases begin after the research contract is merged.
+The repository now has a versioned machine-readable record for tasks, agents, languages, toolchains, environments, trials, interventions, verification outcomes, and retained evidence. No language ranking, legacy-survival claim, modding claim, or social-perception claim is considered established by the schema itself.
+
+Phase 2 will build the first equivalent-task language harness on top of this record contract.
 
 ## Scope
 

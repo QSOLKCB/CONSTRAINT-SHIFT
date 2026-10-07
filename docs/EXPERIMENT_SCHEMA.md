@@ -1,0 +1,102 @@
+# Phase 1 Experiment Schema
+
+Phase 1 defines the machine-readable evidence record used by later CONSTRAINT-SHIFT experiments. It records what was attempted and under which frozen contract; it does not turn a trial into a conclusion.
+
+## Files
+
+- `schema/experiment-record.schema.json` — JSON Schema Draft 2020-12 structural contract.
+- `schema/examples/success.json` — valid successful-trial example.
+- `schema/examples/failed-trial.json` — valid failed-trial example demonstrating invariant I3.
+- `scripts/validate_phase1.py` — dependency-free validator for the schema subset used here plus project semantic checks.
+- `tests/test_phase1.py` — regression tests for versioning, strict fields, references, ordering, timestamps, paths, duplicate keys, and non-JSON numeric constants.
+
+## Versioning
+
+Every record declares `schema_version`. The current Phase 1 contract is `2.0.0`.
+
+- **PATCH**: documentation, fixtures, or validator fixes that do not change valid record meaning.
+- **MINOR**: backward-compatible schema additions whose semantics are explicitly documented.
+- **MAJOR**: incompatible field, interpretation, or required-data changes.
+
+The validator accepts the exact version it implements. Records are never silently upgraded or reinterpreted.
+
+Version `2.0.0` introduces the required nonempty verification-outcome array and the stricter portable-path and timestamp rules. This is a major contract change. The original `1.0.0` schema and validator remain available at commit `46a6b6e37c974c2bb522eada74e094cd44cfb7f0`; use that revision to validate historical records. The current validator reports a version mismatch for `1.0.0`, rather than interpreting it under `2.0.0`. Migration requires explicitly retaining a verification outcome and its evidence (including an evidence-backed `not_run` when appropriate), checking paths and timestamps, and changing the version only after those requirements are satisfied. Do not invent verification results merely to migrate a record.
+
+## Required record domains
+
+A record contains:
+
+1. schema identity and record identity;
+2. linked project hypothesis identifiers;
+3. the frozen task and equivalence group;
+4. the generating or acting agent;
+5. language and toolchain metadata;
+6. execution environment;
+7. the predeclared trial-handling and analysis contract;
+8. one trial and its factors/measurements;
+9. recorded interventions;
+10. verification outcomes; and
+11. a retained evidence manifest with SHA-256 identities.
+
+Optional metadata should be omitted when unavailable rather than invented. Required values must describe the observed experiment, not an assumed default.
+
+## Evidence references
+
+`task.specification_ref`, `task.acceptance_ref`, optional agent/toolchain references, intervention references, and verification references resolve to `evidence[].evidence_id`.
+
+The repository validator rejects dangling evidence references and duplicate evidence identifiers. Evidence paths are repository-relative on both POSIX and Windows: slash-rooted, backslash-rooted, UNC, and drive-prefixed paths (including drive-relative paths such as `C:log.txt`) are rejected. Parent traversal through `..` is rejected with either slash or backslash separators, including mixed separators.
+
+The schema does not assert that a listed path currently has the declared digest. Later execution/archival phases may bind and verify physical evidence files. Phase 1 establishes the record contract and referential integrity.
+
+## Failures are valid records
+
+`trial.status` may be `success`, `failure`, `invalid`, `timeout`, or `aborted`. A failed trial is not schema-invalid merely because its outcome is negative.
+
+The supplied `failed-trial.json` fixture must remain a valid record with status `failure`. This makes I3 — Preserve failures — executable at the schema layer.
+
+## Verification separation
+
+Each verification outcome records `independent_from_generator`. The field records independence; it does not manufacture it. A generator claiming its own output is correct is not independent verification under I6.
+
+Every record requires at least one verification outcome. Each outcome must retain verification evidence through at least one evidence reference, including for `not_run` outcomes (for example, a retained log explaining why verification could not run). An empty outcome array cannot substitute for an explicit `not_run` result.
+
+## Timestamps and integers
+
+`created_at`, `trial.started_at`, and `trial.ended_at` require RFC 3339 syntax: a full calendar date, `T` separator, hours/minutes/seconds, and `Z` or a colon-separated numeric offset. Lowercase `t`/`z` and dot-separated fractional seconds are accepted. Calendar dates and offset ranges are validated; spaces, omitted seconds, compact offsets, and offset seconds are rejected. The validator supports seconds `00`–`59`; leap-second timestamps are not supported.
+
+Trial time ordering compares UTC whole seconds and every fractional digit, without truncating to microseconds. Equivalent fractions with trailing zeros compare equally, and numeric offsets are applied before comparison.
+
+Integer fields follow JSON Schema numeric semantics: `1` and `1.0` both represent an integer. Fractional and non-finite values and booleans are rejected. Minimum bounds and intervention sequence ordering also apply to integral decimal values.
+
+The JSON loader retains decimal and exponent tokens as exact `decimal.Decimal` values. Integer, number, and minimum checks use those values directly, so a token such as `0.99999999999999999` cannot round to an accepted integer. Callers validating JSON records should use `load_json()` to preserve the wire values.
+
+## Predeclaration
+
+The `predeclared` object carries the experiment rules required by the methodology before outcome inspection: experimental unit, acceptance criteria, resource limits, stopping rule, inclusion/exclusion rules, invalid-trial rule, timeout rule, missing-data rule, and primary denominators.
+
+This keeps later analysis from silently changing the denominator or deleting inconvenient failures after results are known.
+
+## Deliberate exclusions
+
+Phase 1 does **not** define:
+
+- a language leaderboard;
+- a universal composite score;
+- a Phase 2 execution harness;
+- hypothesis-support labels inside raw trial records; or
+- automatic empirical conclusions.
+
+Those belong to later phases and must remain separable from the evidence record.
+
+## Validation
+
+```bash
+python3 scripts/validate_phase1.py
+python3 -m unittest tests.test_phase1 -v
+```
+
+The normal repository test discovery also includes the Phase 1 tests:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
