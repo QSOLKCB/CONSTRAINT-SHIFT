@@ -97,6 +97,15 @@ OS/kernel/architecture and full observed tool version output are retained.
 Process bounds are not a sandbox: supplied programs execute with the operator's
 permissions. Use an isolated host/container when candidates require isolation.
 
+The subprocess boundary accepts only a nonempty list of string arguments with
+an absolute executable and no NUL bytes. Fixed adapter commands choose a resolved
+tool or the built binary, and `shell=False` keeps each argument literal. Tests
+cover shell metacharacters and rejection of command strings. The single `Popen`
+call carries a rule-specific `nosemgrep` audit annotation for
+`python.lang.security.audit.dangerous-subprocess-use-audit`; dynamic argv is
+necessary for toolchain execution and does not imply shell evaluation. Other
+security rules and subprocess call sites remain scanned.
+
 ## Evidence and verification
 
 Each bundle contains `contract/` snapshots, one directory per selected language,

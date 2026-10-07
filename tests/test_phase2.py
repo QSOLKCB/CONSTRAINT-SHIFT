@@ -189,6 +189,26 @@ class LanguageHarnessTests(unittest.TestCase):
                 self.fail(f"descendant did not terminate after group SIGKILL: {observed}")
             time.sleep(0.01)
 
+    def test_subprocess_arguments_are_literal_even_with_shell_metacharacters(self):
+        marker = self.base / "must-not-be-created"
+        arguments = [f"; touch {marker}", f"$(touch {marker})", f"`touch {marker}`",
+                     "spaces and 'quotes' and $HOME"]
+        code = "import json, sys; print(json.dumps(sys.argv[1:]))"
+        result = harness.execute([sys.executable, "-c", code, *arguments],
+                                 self.base, b"", 5, 4096, dict(os.environ))
+        self.assertTrue(harness.passed(result))
+        self.assertEqual(arguments, json.loads(result["stdout"]))
+        self.assertEqual(b"", result["stderr"])
+        self.assertFalse(marker.exists())
+
+    def test_command_strings_relative_executables_and_invalid_argv_are_rejected(self):
+        for argv in ("echo unsafe", [], [""], ["python3"], [sys.executable, 1],
+                     [sys.executable, "bad\0argument"]):
+            with self.subTest(argv=argv), patch.object(harness.subprocess, "Popen") as popen:
+                with self.assertRaisesRegex(ValueError, "absolute executable"):
+                    harness.execute(argv, self.base, b"", 5, 4096, dict(os.environ))
+                popen.assert_not_called()
+
     def test_unusable_version_probe_is_invalid(self):
         tool = self.fake_tool("import sys\nprint('broken tool', file=sys.stderr)\nsys.exit(3)\n")
         with patch.object(harness, "resolve_tool", return_value=tool):

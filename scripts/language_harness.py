@@ -118,10 +118,19 @@ def retained_record_contract(common: Path):
 def execute(argv: list[str], cwd: Path, stdin: bytes, timeout: float,
             output_limit: int, env: dict[str, str]) -> dict:
     """Bound captured output and the whole process group, without a shell."""
+    if (not isinstance(argv, list) or not argv
+            or any(not isinstance(argument, str) or "\0" in argument for argument in argv)
+            or not Path(argv[0]).is_absolute()):
+        raise ValueError("execution requires a nonempty string argv list with an absolute executable")
+    argv = list(argv)
     started = time.monotonic_ns()
     result = {"argv": argv, "status": "error", "returncode": None,
               "stdout": b"", "stderr": b""}
     try:
+        # Audited boundary: fixed adapter commands select resolved tools or the
+        # built binary; paths/arguments remain separate literal tokens. Candidate
+        # execution is intentional. This is process control, not a sandbox.
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
         child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  start_new_session=True, shell=False)
