@@ -1,0 +1,672 @@
+from pathlib import Path
+import importlib.util
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+VALIDATOR = ROOT / "scripts" / "validate_phase0.py"
+
+spec = importlib.util.spec_from_file_location("validate_phase0_regressions", VALIDATOR)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+
+def contract_texts() -> dict[str, str]:
+    return {relative: module.read_text(relative) for relative in module.REQUIRED_FILES}
+
+
+class MarkdownParserRegressionMatrix(unittest.TestCase):
+    def test_heading_container_matrix(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        cases = (
+            ("top-level", f"## {heading}", True),
+            ("bullet", f"- ## {heading}", True),
+            ("blockquote", f"> ## {heading}", True),
+            ("ordered-one-interrupts", f"paragraph\n1. ## {heading}", True),
+            ("ordered-two-does-not-interrupt", f"paragraph\n2. ## {heading}", False),
+            ("four-space-padding", f"-    ## {heading}", True),
+            ("five-space-padding-is-code", f"-     ## {heading}", False),
+            ("tab-plus-two-spaces-is-code", f"-\t  ## {heading}", False),
+        )
+
+        for name, markdown, expected in cases:
+            with self.subTest(name=name):
+                headings = module.markdown_level2_headings(markdown)
+                self.assertEqual(expected, heading in headings)
+
+    def test_tab_overshoot_is_preserved(self) -> None:
+        self.assertEqual((), module.markdown_level2_headings(
+            "-\n\t  ## I14 — Contract changes are explicit"
+        ))
+
+    def test_list_scoped_html_matrix(self) -> None:
+        cases = (
+            (
+                "generic-html-after-interrupting-bullet",
+                "paragraph\n- <span>\n  ## I14 — Contract changes are explicit\n\n",
+                True,
+            ),
+            (
+                "dedent-ends-list-html",
+                "- <div>\n## I14 — Contract changes are explicit",
+                False,
+            ),
+            (
+                "indented-heading-stays-in-list-html",
+                "- <div>\n  ## I14 — Contract changes are explicit\n\n",
+                True,
+            ),
+        )
+
+        for name, suffix, should_hide in cases:
+            with self.subTest(name=name):
+                texts = contract_texts()
+                texts["INVARIANTS.md"] = texts["INVARIANTS.md"].replace(
+                    "## I14 — Contract changes are explicit",
+                    "## Contract changes are explicit",
+                    1,
+                )
+                texts["INVARIANTS.md"] += "\n" + suffix
+                errors = module.validate_texts(texts)
+                has_invariant_error = any(
+                    "invariant headings must exactly match" in error
+                    for error in errors
+                )
+                self.assertEqual(should_hide, has_invariant_error)
+
+    def test_blockquote_scoped_html_stays_active(self) -> None:
+        markdown = (
+            "> <div>\n"
+            "> ## I14 — Contract changes are explicit\n"
+            ">\n"
+        )
+        self.assertEqual((), module.markdown_level2_headings(markdown))
+
+    def test_reference_definition_closes_paragraph_state(self) -> None:
+        markdown = (
+            "[hidden]: /url\n"
+            "2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_tab_marker_padding_preserves_visual_indent(self) -> None:
+        self.assertEqual((), module.markdown_level2_headings(
+            "-\t  ## I14 — Contract changes are explicit"
+        ))
+
+    def test_nested_tab_padding_uses_outer_visual_column(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        markdown = f"- -\t  ## {heading}"
+        self.assertIn(heading, module.markdown_level2_headings(markdown))
+
+    def test_blockquote_fence_stays_active(self) -> None:
+        markdown = (
+            "> ~~~\n"
+            "> ## I14 — Contract changes are explicit\n"
+            "> ~~~\n"
+        )
+        self.assertEqual((), module.markdown_level2_headings(markdown))
+
+    def test_first_line_list_code_not_rendered_prose(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "-     machine-checkable Phase 0 validator"
+        )
+        self.assertNotIn("machine-checkable Phase 0 validator", prose)
+
+    def test_whitespace_only_reference_label_is_visible(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            '[ ]: /url "machine-checkable Phase 0 validator"'
+        )
+        self.assertIn("machine-checkable Phase 0 validator", prose)
+
+    def test_blockquote_comment_ends_on_container_exit(self) -> None:
+        markdown = (
+            "> <!--\n"
+            "## I14 — Contract changes are explicit\n"
+            "-->\n"
+        )
+        self.assertIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_blockquote_reference_definition_is_hidden(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            '> [hidden]: /url "machine-checkable Phase 0 validator"'
+        )
+        self.assertNotIn("machine-checkable Phase 0 validator", prose)
+
+    def test_inline_link_title_is_not_rendered_prose(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            '[visible](/url "machine-checkable Phase 0 validator")'
+        )
+        self.assertEqual("visible", prose.strip())
+
+    def test_multiline_reference_definition_resets_state(self) -> None:
+        markdown = (
+            "[hidden]:\n"
+            "/url\n"
+            "2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_raw_html_container_identity_rejects_replacement(self) -> None:
+        markdown = (
+            "- <div>\n"
+            "> ## I14 — Contract changes are explicit\n"
+        )
+        self.assertIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_unicode_only_list_paragraph_blocks_nested_ordered_two(self) -> None:
+        markdown = (
+            "- \u00a0\n"
+            "  2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertNotIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_lazy_dedent_eligibility_updates_after_visible_continuation(self) -> None:
+        markdown = (
+            "- \u00a0\n"
+            "  ordinary paragraph\n"
+            "2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_quoted_list_dedent_uses_container_relative_columns(self) -> None:
+        markdown = (
+            "> - \u00a0\n"
+            ">   2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertNotIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_paragraph_container_transition_matrix(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        cases = (
+            (
+                "fresh-quote-resets-outer-paragraph",
+                f"paragraph\n> 2. ## {heading}\n",
+                True,
+            ),
+            (
+                "same-list-paragraph-rejects-first-two",
+                f"- \u00a0\n  2. ## {heading}\n",
+                False,
+            ),
+            (
+                "same-list-paragraph-rejects-repeated-two",
+                f"- \u00a0\n  2. ## {heading}\n  2. ## {heading}\n",
+                False,
+            ),
+            (
+                "quoted-list-paragraph-rejects-two",
+                f"> - \u00a0\n>   2. ## {heading}\n",
+                False,
+            ),
+            (
+                "nested-quote-is-fresh-container",
+                f"> - item\n> > 2. ## {heading}\n",
+                True,
+            ),
+        )
+
+        for name, markdown, expected_visible in cases:
+            with self.subTest(name=name):
+                headings = module.markdown_level2_headings(markdown)
+                self.assertEqual(expected_visible, heading in headings)
+
+    def test_nested_quote_ends_list_paragraph_before_reference(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            '> - item\n> > [hidden]: /url "machine-checkable Phase 0 validator"'
+        )
+        self.assertNotIn("machine-checkable Phase 0 validator", prose)
+
+    def test_lazy_quoted_paragraph_retains_quote_owner_after_dedent(self) -> None:
+        markdown = (
+            "> - item\n"
+            "> 2. ## I14 — Contract changes are explicit\n"
+        )
+        self.assertIn(
+            "I14 — Contract changes are explicit",
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_mixed_quote_list_fence_continues_by_indentation(self) -> None:
+        markdown = (
+            "> - ~~~\n"
+            ">   ## I14 — Contract changes are explicit\n"
+            ">   ~~~\n"
+        )
+        self.assertEqual((), module.markdown_level2_headings(markdown))
+
+    def test_quoted_soft_break_strips_container_markers(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "> validator"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_reference_rendering_resolved_vs_unresolved(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        unresolved = module.markdown_rendered_prose_text(
+            f"[visible][{required}]"
+        )
+        self.assertIn(required, unresolved)
+
+        resolved = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            f"[{required}]: /url"
+        )
+        self.assertNotIn(required, resolved)
+
+    def test_quoted_indented_code_is_not_rendered_prose(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            ">     machine-checkable Phase 0 validator"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_inline_html_attributes_are_not_rendered_prose(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            'visible <span title="machine-checkable Phase 0 validator">'
+            'text</span>'
+        )
+        self.assertEqual("visible\ntext", prose.strip())
+
+    def test_nested_fence_sibling_and_indented_continuation(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+
+        sibling = (
+            "- - ~~~\n"
+            f"-   ## {heading}\n"
+        )
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(sibling),
+        )
+
+        continuation = (
+            "> - ~~~\n"
+            f">   ## {heading}\n"
+            ">   ~~~\n"
+        )
+        self.assertNotIn(
+            heading,
+            module.markdown_level2_headings(continuation),
+        )
+
+    def test_reference_definition_after_fence_resolves_link(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        prose = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "```\ncode\n```\n"
+            f"[{required}]: /url"
+        )
+        self.assertNotIn(required, prose)
+
+    def test_blockquote_soft_break_lazy_and_explicit_forms(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        explicit = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n> validator"
+        )
+        lazy = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\nvalidator"
+        )
+        self.assertIn(required, explicit)
+        self.assertIn(required, lazy)
+
+    def test_escaped_inline_html_remains_literal(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        escaped = module.markdown_rendered_prose_text(
+            '\\<span title="' + required + '">'
+        )
+        unescaped = module.markdown_rendered_prose_text(
+            '<span title="' + required + '">text</span>'
+        )
+        self.assertIn(required, escaped)
+        self.assertNotIn(required, unescaped)
+
+    def test_list_boundary_prevents_soft_break_join(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "machine-checkable Phase 0\n- validator"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_full_reference_escaped_bracket_label(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        label = required + "\\]"
+        prose = module.markdown_rendered_prose_text(
+            f"[visible][{label}]\n\n"
+            f"[{label}]: /url"
+        )
+        self.assertNotIn(required, prose)
+
+    def test_quoted_code_after_open_paragraph_is_still_code(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "ordinary paragraph\n"
+            ">     machine-checkable Phase 0 validator"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_quote_scoped_fence_blank_line_boundary_matrix(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        unquoted_blank = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "> ```\n"
+            "\n"
+            f"> [{required}]: /url"
+        )
+        self.assertNotIn(required, unquoted_blank)
+
+        quoted_blank = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "> ```\n"
+            ">\n"
+            f"> [{required}]: /url"
+        )
+        self.assertIn(required, quoted_blank)
+
+    def test_lazy_quote_ordered_marker_matrix(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+
+        plain = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "validator"
+        )
+        ordered_two = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "2. validator"
+        )
+        ordered_one = module.markdown_rendered_prose_text(
+            "> machine-checkable Phase 0\n"
+            "1. validator"
+        )
+
+        self.assertIn(required, plain)
+        self.assertNotIn(required, ordered_two)
+        self.assertEqual("machine-checkable Phase 0\nvalidator", ordered_two)
+        self.assertNotIn(required, ordered_one)
+        self.assertNotIn("1. validator", ordered_one)
+
+    def test_quote_scoped_html_blank_boundary_matrix(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+
+        raw_html_unquoted_blank = (
+            "> <pre>\n"
+            "\n"
+            f"> ## {heading}\n"
+        )
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(
+                raw_html_unquoted_blank
+            ),
+        )
+
+        raw_html_quoted_blank = (
+            "> <pre>\n"
+            ">\n"
+            f"> ## {heading}\n"
+        )
+        self.assertNotIn(
+            heading,
+            module.markdown_level2_headings(
+                raw_html_quoted_blank
+            ),
+        )
+
+        comment_unquoted_blank = (
+            "> <!--\n"
+            "\n"
+            f"> ## {heading}\n"
+        )
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(
+                comment_unquoted_blank
+            ),
+        )
+
+    def test_commonmark_escape_rendering_matrix(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        escaped = module.markdown_rendered_prose_text(
+            "machine\\-checkable Phase 0 validator"
+        )
+        non_escape = module.markdown_rendered_prose_text(
+            "machine\\q-checkable Phase 0 validator"
+        )
+        self.assertIn(required, escaped)
+        self.assertNotIn(required, non_escape)
+
+    def test_quoted_multiline_code_span_is_hidden(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> `machine-checkable Phase 0\n"
+            "> validator`"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_reference_label_length_boundary(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        valid_label = ("a" * (999 - len(required))) + required
+        invalid_label = ("a" * (1000 - len(required))) + required
+
+        valid = module.markdown_rendered_prose_text(
+            f"[visible][{valid_label}]\n\n"
+            f"[{valid_label}]: /url"
+        )
+        invalid = module.markdown_rendered_prose_text(
+            f"[visible][{invalid_label}]\n\n"
+            f"[{invalid_label}]: /url"
+        )
+        self.assertNotIn(required, valid)
+        self.assertIn(required, invalid)
+
+    def test_multiline_inline_link_title_is_hidden_metadata(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            '[visible](/url "machine-checkable Phase 0\n'
+            'validator")'
+        )
+        self.assertEqual("visible", prose.strip())
+
+    def test_non_commonmark_unicode_separators_stay_inline(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        for separator in ("\u0085", "\u2028"):
+            with self.subTest(separator=ord(separator)):
+                markdown = f"ordinary{separator}## {heading}"
+                self.assertNotIn(
+                    heading,
+                    module.markdown_level2_headings(markdown),
+                )
+
+    def test_quote_tab_padding_preserves_overshoot(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        markdown = f">\t  ## {heading}"
+        self.assertNotIn(
+            heading,
+            module.markdown_level2_headings(markdown),
+        )
+
+    def test_nested_quote_marker_after_tab_is_visible(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(
+                f"> \t> ## {heading}"
+            ),
+        )
+
+    def test_reference_use_label_length_boundary(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        definition = f"[{required}]: /url"
+
+        valid_use = (" " * (999 - len(required))) + required
+        invalid_use = (" " * 1000) + required
+
+        valid = module.markdown_rendered_prose_text(
+            f"[visible][{valid_use}]\n\n{definition}"
+        )
+        invalid = module.markdown_rendered_prose_text(
+            f"[visible][{invalid_use}]\n\n{definition}"
+        )
+        self.assertNotIn(required, valid)
+        self.assertIn(required, invalid)
+
+    def test_link_text_decodes_markdown_escape(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "[machine\\-checkable Phase 0 validator](/url)"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_invalid_multiline_inline_link_remains_literal(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "[visible](/url machine-checkable Phase 0\n"
+            "validator)"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_lazily_opened_quoted_code_span_is_hidden(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> prefix\n"
+            "`machine-checkable Phase 0\n"
+            "> validator`"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_inline_comment_survives_lazy_quote_continuation(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> visible <!--\n"
+            "machine-checkable Phase 0 validator -->"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_reference_definition_after_html_closer_resolves(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        prose = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "<pre>\nstuff\n</pre>\n"
+            f"[{required}]: /url"
+        )
+        self.assertNotIn(required, prose)
+
+    def test_same_shape_sibling_blocks_do_not_own_each_other(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        for opener in ("~~~", "<div>", "<!--"):
+            with self.subTest(opener=opener):
+                markdown = f"- {opener}\n- ## {heading}\n"
+                self.assertIn(
+                    heading,
+                    module.markdown_level2_headings(markdown),
+                )
+
+    def test_backslash_before_code_span_closer_is_literal_code(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "`machine-checkable Phase 0 validator\\`"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_malformed_link_destination_remains_visible(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "[visible](machine-checkable Phase 0 validator)"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_rendered_entities_and_emphasis_are_normalized(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        self.assertIn(
+            required,
+            module.markdown_rendered_prose_text(
+                "machine&#45;checkable Phase 0 validator"
+            ),
+        )
+        self.assertIn(
+            required,
+            module.markdown_rendered_prose_text(
+                "**machine-checkable** Phase 0 validator"
+            ),
+        )
+
+    def test_hidden_reference_definitions_do_not_resolve(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        for opener, closer in (
+            ("<pre>", "</pre>"),
+            ("<!--", "-->"),
+        ):
+            with self.subTest(opener=opener):
+                prose = module.markdown_rendered_prose_text(
+                    f"[visible][{required}]\n\n"
+                    f"{opener}\n\n"
+                    f"[{required}]: /url\n"
+                    f"{closer}\n"
+                )
+                self.assertIn(required, prose)
+
+    def test_list_reference_tab_padding_is_hidden(self) -> None:
+        texts = contract_texts()
+        texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
+            "machine-checkable Phase 0 validator",
+            "Phase 0 validator",
+            1,
+        )
+        texts["ROADMAP.md"] += (
+            "\n- [hidden]:\n"
+            "\t  /url\n"
+            '  "machine-checkable Phase 0 validator"\n'
+        )
+        self.assertIn("roadmap does not require Phase 0 validator",
+                      module.validate_texts(texts))
+
+
+if __name__ == "__main__":
+    unittest.main()
