@@ -32,14 +32,24 @@ The repository intentionally separates **motivation**, **hypothesis**, **measure
 
 ## Phase 0 validation
 
-The foundational contract is mechanically checked with the Python standard library only:
+The foundational contract uses Python 3.12 or 3.14 and a pinned CommonMark parser.
+Install the two hashed runtime dependencies before running the validator or tests:
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install --require-hashes -r requirements.txt
 python3 scripts/validate_phase0.py
 python3 -m unittest discover -s tests -v
 ```
 
-The validator checks that required research artifacts exist, the six hypothesis identifiers are present, key terms are defined, and the roadmap records the Phase 0 contract.
+The validator checks required files, exact ordered hypothesis/invariant/terminology
+heading inventories, two required prose statements, the Phase 0 roadmap heading,
+and a non-whitespace source-size heuristic. It does not assess the completeness
+of section bodies or establish empirical support for any hypothesis.
+
+[Validation policy](docs/VALIDATION.md) defines eligible headings, decoded prose,
+excluded metadata, parser compatibility corrections, and regression coverage.
 
 ## Planned experimental flow
 

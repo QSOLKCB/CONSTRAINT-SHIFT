@@ -15,7 +15,7 @@ Deliverables:
 - [x] research invariants;
 - [x] five research-track briefs;
 - [x] machine-checkable Phase 0 validator;
-- [x] standard-library unit tests;
+- [x] standard-library `unittest` runner with pinned CommonMark parsing;
 - [x] CI validation.
 
 Exit criterion: the Phase 0 validator and test suite pass on the merged default branch.

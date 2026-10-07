@@ -35,10 +35,9 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
                 self.assertEqual(expected, heading in headings)
 
     def test_tab_overshoot_is_preserved(self) -> None:
-        self.assertEqual(
-            "    /url",
-            module._strip_columns_prefix("\t  /url", 2),
-        )
+        self.assertEqual((), module.markdown_level2_headings(
+            "-\n\t  ## I14 — Contract changes are explicit"
+        ))
 
     def test_list_scoped_html_matrix(self) -> None:
         cases = (
@@ -94,14 +93,9 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
         )
 
     def test_tab_marker_padding_preserves_visual_indent(self) -> None:
-        context = module._list_item_context(
+        self.assertEqual((), module.markdown_level2_headings(
             "-\t  ## I14 — Contract changes are explicit"
-        )
-        self.assertIsNotNone(context)
-        assert context is not None
-        content_column, content = context
-        self.assertEqual(2, content_column)
-        self.assertTrue(content.startswith("    ##"))
+        ))
 
     def test_nested_tab_padding_uses_outer_visual_column(self) -> None:
         heading = "I14 — Contract changes are explicit"
@@ -188,7 +182,7 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             "  ordinary paragraph\n"
             "2. ## I14 — Contract changes are explicit\n"
         )
-        self.assertNotIn(
+        self.assertIn(
             "I14 — Contract changes are explicit",
             module.markdown_level2_headings(markdown),
         )
@@ -249,7 +243,7 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             "> - item\n"
             "> 2. ## I14 — Contract changes are explicit\n"
         )
-        self.assertNotIn(
+        self.assertIn(
             "I14 — Contract changes are explicit",
             module.markdown_level2_headings(markdown),
         )
@@ -300,7 +294,7 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             'visible <span title="machine-checkable Phase 0 validator">'
             'text</span>'
         )
-        self.assertEqual("visible text", prose.strip())
+        self.assertEqual("visible\ntext", prose.strip())
 
     def test_nested_fence_sibling_and_indented_continuation(self) -> None:
         heading = "I14 — Contract changes are explicit"
@@ -421,7 +415,7 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
 
         self.assertIn(required, plain)
         self.assertNotIn(required, ordered_two)
-        self.assertIn("2. validator", ordered_two)
+        self.assertEqual("machine-checkable Phase 0\nvalidator", ordered_two)
         self.assertNotIn(required, ordered_one)
         self.assertNotIn("1. validator", ordered_one)
 
@@ -658,7 +652,7 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
                 )
                 self.assertIn(required, prose)
 
-    def test_list_reference_tab_overshoot_stays_visible(self) -> None:
+    def test_list_reference_tab_padding_is_hidden(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
             "machine-checkable Phase 0 validator",
@@ -670,7 +664,8 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             "\t  /url\n"
             '  "machine-checkable Phase 0 validator"\n'
         )
-        self.assertEqual([], module.validate_texts(texts))
+        self.assertIn("roadmap does not require Phase 0 validator",
+                      module.validate_texts(texts))
 
 
 if __name__ == "__main__":

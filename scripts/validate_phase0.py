@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""Validate the Phase 0 CONSTRAINT-SHIFT research contract."""
+"""Validate the Phase 0 research contract using one CommonMark parse per file."""
 
 from __future__ import annotations
 
 from pathlib import Path
-import html
 import re
-import string
+import logging
 import sys
+from typing import NamedTuple
+
+try:
+    from markdown_it import MarkdownIt
+    from markdown_it.token import Token
+    from markdown_it.common.utils import charCodeAt, isSpace, isStrSpace, normalizeReference
+    from markdown_it.rules_block import StateBlock
+    from markdown_it.rules_inline import StateInline
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Phase 0 validator dependencies are missing; run "
+        "python3 -m pip install --require-hashes -r requirements.txt"
+    ) from exc
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,51 +81,632 @@ INVARIANTS = (
 
 HYPOTHESIS_HEADING_RE = re.compile(r"^H\d+ — .+$")
 INVARIANT_HEADING_RE = re.compile(r"^I\d+ — .+$")
-FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
-ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
-SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
-LIST_ITEM_RE = re.compile(
-    r"^ {0,3}(?:(?P<bullet>[-+*])|(?P<number>\d{1,9})[.)])"
-    r"(?P<spacing>[ \t]+)"
-)
-THEMATIC_BREAK_RE = re.compile(
-    r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
-)
-RAW_HTML_TYPE1_OPEN_RE = re.compile(
-    r"^ {0,3}<(?P<tag>script|pre|style|textarea)(?:[ \t>]|$)",
-    re.IGNORECASE,
-)
-RAW_HTML_BLOCK_TAGS = (
-    "address", "article", "aside", "base", "basefont", "blockquote", "body",
-    "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
-    "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
-    "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head",
-    "header", "hr", "html", "iframe", "legend", "li", "link", "main", "menu",
-    "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
-    "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
-    "thead", "title", "tr", "track", "ul",
-)
-RAW_HTML_BLOCK_TAG_RE = re.compile(
-    r"^ {0,3}</?(?:" + "|".join(RAW_HTML_BLOCK_TAGS) + r")(?:[ \t/>]|$)",
-    re.IGNORECASE,
-)
-RAW_HTML_GENERIC_OPEN_TAG_RE = re.compile(
-    r"^ {0,3}<[A-Za-z][A-Za-z0-9-]*"
-    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"
-    r"(?:[ \t]*=[ \t]*(?:\"[^\"]*\"|'[^']*'|[^ \t\"'=<>\x60]+))?)*"
-    r"[ \t]*/?>[ \t]*$"
-)
-RAW_HTML_GENERIC_CLOSE_TAG_RE = re.compile(
-    r"^ {0,3}</[A-Za-z][A-Za-z0-9-]*[ \t]*>[ \t]*$"
-)
+
+
+class Heading(NamedTuple):
+    title: str
+    line: int
+
+
+class ProseBlock(NamedTuple):
+    text: str
+    line: int
+
+
+class Document(NamedTuple):
+    headings: tuple[Heading, ...]
+    prose: tuple[ProseBlock, ...]
+
+
+# The four rules below are adapted from markdown-it-py 4.2.0 (MIT).
+# See THIRD_PARTY_NOTICES.md. They run in the same parser state, not as
+# independent scans. Changes: raw reference-label length <=999, and trim
+# only CommonMark whitespace from paragraphs. All other parsing is upstream.
+LOGGER = logging.getLogger(__name__)
+
+def reference(state: StateBlock, startLine: int, _endLine: int, silent: bool) -> bool:
+    LOGGER.debug(
+        "entering reference: %s, %s, %s, %s", state, startLine, _endLine, silent
+    )
+
+    pos = state.bMarks[startLine] + state.tShift[startLine]
+    maximum = state.eMarks[startLine]
+    nextLine = startLine + 1
+
+    if state.is_code_block(startLine):
+        return False
+
+    if state.src[pos] != "[":
+        return False
+
+    string = state.src[pos : maximum + 1]
+
+    # string = state.getLines(startLine, nextLine, state.blkIndent, False).strip()
+    maximum = len(string)
+
+    labelEnd = None
+    pos = 1
+    while pos < maximum:
+        ch = charCodeAt(string, pos)
+        if ch == 0x5B:  # /* [ */
+            return False
+        elif ch == 0x5D:  # /* ] */
+            labelEnd = pos
+            break
+        elif ch == 0x0A:  # /* \n */
+            if (lineContent := getNextLine(state, nextLine)) is not None:
+                string += lineContent
+                maximum = len(string)
+                nextLine += 1
+        elif ch == 0x5C:  # /* \ */
+            pos += 1
+            if (
+                pos < maximum
+                and charCodeAt(string, pos) == 0x0A
+                and (lineContent := getNextLine(state, nextLine)) is not None
+            ):
+                string += lineContent
+                maximum = len(string)
+                nextLine += 1
+        pos += 1
+
+    if (
+        labelEnd is None or labelEnd < 0 or charCodeAt(string, labelEnd + 1) != 0x3A
+    ):  # /* : */
+        return False
+
+    # [label]:   destination   'title'
+    #         ^^^ skip optional whitespace here
+    pos = labelEnd + 2
+    while pos < maximum:
+        ch = charCodeAt(string, pos)
+        if ch == 0x0A:
+            if (lineContent := getNextLine(state, nextLine)) is not None:
+                string += lineContent
+                maximum = len(string)
+                nextLine += 1
+        elif isSpace(ch):
+            pass
+        else:
+            break
+        pos += 1
+
+    # [label]:   destination   'title'
+    #            ^^^^^^^^^^^ parse this
+    destRes = state.md.helpers.parseLinkDestination(string, pos, maximum)
+    if not destRes.ok:
+        return False
+
+    href = state.md.normalizeLink(destRes.str)
+    if not state.md.validateLink(href):
+        return False
+
+    pos = destRes.pos
+
+    # save cursor state, we could require to rollback later
+    destEndPos = pos
+    destEndLineNo = nextLine
+
+    # [label]:   destination   'title'
+    #                       ^^^ skipping those spaces
+    start = pos
+    while pos < maximum:
+        ch = charCodeAt(string, pos)
+        if ch == 0x0A:
+            if (lineContent := getNextLine(state, nextLine)) is not None:
+                string += lineContent
+                maximum = len(string)
+                nextLine += 1
+        elif isSpace(ch):
+            pass
+        else:
+            break
+        pos += 1
+
+    # [label]:   destination   'title'
+    #                          ^^^^^^^ parse this
+    titleRes = state.md.helpers.parseLinkTitle(string, pos, maximum, None)
+    while titleRes.can_continue:
+        if (lineContent := getNextLine(state, nextLine)) is None:
+            break
+        string += lineContent
+        pos = maximum
+        maximum = len(string)
+        nextLine += 1
+        titleRes = state.md.helpers.parseLinkTitle(string, pos, maximum, titleRes)
+
+    if pos < maximum and start != pos and titleRes.ok:
+        title = titleRes.str
+        pos = titleRes.pos
+    else:
+        title = ""
+        pos = destEndPos
+        nextLine = destEndLineNo
+
+    # skip trailing spaces until the rest of the line
+    while pos < maximum:
+        ch = charCodeAt(string, pos)
+        if not isSpace(ch):
+            break
+        pos += 1
+
+    if pos < maximum and charCodeAt(string, pos) != 0x0A and title:
+        # garbage at the end of the line after title,
+        # but it could still be a valid reference if we roll back
+        title = ""
+        pos = destEndPos
+        nextLine = destEndLineNo
+        while pos < maximum:
+            ch = charCodeAt(string, pos)
+            if not isSpace(ch):
+                break
+            pos += 1
+
+    if pos < maximum and charCodeAt(string, pos) != 0x0A:
+        # garbage at the end of the line
+        return False
+
+    # Compatibility correction: length is checked before label normalization.
+    if labelEnd - 1 > 999:
+        return False
+    label = normalizeReference(string[1:labelEnd])
+    if not label:
+        # CommonMark 0.20 disallows empty labels
+        return False
+
+    # Reference can not terminate anything. This check is for safety only.
+    if silent:
+        return True
+
+    if "references" not in state.env:
+        state.env["references"] = {}
+
+    state.line = nextLine
+
+    # note, this is not part of markdown-it JS, but is useful for renderers
+    if state.md.options.get("inline_definitions", False):
+        token = state.push("definition", "", 0)
+        token.meta = {
+            "id": label,
+            "title": title,
+            "url": href,
+            "label": string[1:labelEnd],
+        }
+        token.map = [startLine, state.line]
+
+    if label not in state.env["references"]:
+        state.env["references"][label] = {
+            "title": title,
+            "href": href,
+            "map": [startLine, state.line],
+        }
+    else:
+        state.env.setdefault("duplicate_refs", []).append(
+            {
+                "title": title,
+                "href": href,
+                "label": label,
+                "map": [startLine, state.line],
+            }
+        )
+
+    return True
+
+
+def getNextLine(state: StateBlock, nextLine: int) -> None | str:
+    endLine = state.lineMax
+
+    if nextLine >= endLine or state.isEmpty(nextLine):
+        # empty line or end of input
+        return None
+
+    isContinuation = False
+
+    # this would be a code block normally, but after paragraph
+    # it's considered a lazy continuation regardless of what's there
+    if state.is_code_block(nextLine):
+        isContinuation = True
+
+    # quirk for blockquotes, this line should already be checked by that rule
+    if state.sCount[nextLine] < 0:
+        isContinuation = True
+
+    if not isContinuation:
+        terminatorRules = state.md.block.ruler.getRules("reference")
+        oldParentType = state.parentType
+        state.parentType = "reference"
+
+        # Some tags can terminate paragraph without empty line.
+        terminate = False
+        for terminatorRule in terminatorRules:
+            if terminatorRule(state, nextLine, endLine, True):
+                terminate = True
+                break
+
+        state.parentType = oldParentType
+
+        if terminate:
+            # terminated by another block
+            return None
+
+    pos = state.bMarks[nextLine] + state.tShift[nextLine]
+    maximum = state.eMarks[nextLine]
+
+    # max + 1 explicitly includes the newline
+    return state.src[pos : maximum + 1]
+
+
+def link(state: StateInline, silent: bool) -> bool:
+    href = ""
+    title = ""
+    label = None
+    oldPos = state.pos
+    maximum = state.posMax
+    start = state.pos
+    parseReference = True
+
+    if state.src[state.pos] != "[":
+        return False
+
+    labelStart = state.pos + 1
+    labelEnd = state.md.helpers.parseLinkLabel(state, state.pos, True)
+
+    # parser failed to find ']', so it's not a valid link
+    if labelEnd < 0:
+        return False
+
+    pos = labelEnd + 1
+
+    if pos < maximum and state.src[pos] == "(":
+        #
+        # Inline link
+        #
+
+        # might have found a valid shortcut link, disable reference parsing
+        parseReference = False
+
+        # [link](  <href>  "title"  )
+        #        ^^ skipping these spaces
+        pos += 1
+        while pos < maximum:
+            ch = state.src[pos]
+            if not isStrSpace(ch) and ch != "\n":
+                break
+            pos += 1
+
+        if pos >= maximum:
+            return False
+
+        # [link](  <href>  "title"  )
+        #          ^^^^^^ parsing link destination
+        start = pos
+        res = state.md.helpers.parseLinkDestination(state.src, pos, state.posMax)
+        if res.ok:
+            href = state.md.normalizeLink(res.str)
+            if state.md.validateLink(href):
+                pos = res.pos
+            else:
+                href = ""
+
+            # [link](  <href>  "title"  )
+            #                ^^ skipping these spaces
+            start = pos
+            while pos < maximum:
+                ch = state.src[pos]
+                if not isStrSpace(ch) and ch != "\n":
+                    break
+                pos += 1
+
+            # [link](  <href>  "title"  )
+            #                  ^^^^^^^ parsing link title
+            res = state.md.helpers.parseLinkTitle(state.src, pos, state.posMax)
+            if pos < maximum and start != pos and res.ok:
+                title = res.str
+                pos = res.pos
+
+                # [link](  <href>  "title"  )
+                #                         ^^ skipping these spaces
+                while pos < maximum:
+                    ch = state.src[pos]
+                    if not isStrSpace(ch) and ch != "\n":
+                        break
+                    pos += 1
+
+        if pos >= maximum or state.src[pos] != ")":
+            # parsing a valid shortcut link failed, fallback to reference
+            parseReference = True
+
+        pos += 1
+
+    if parseReference:
+        #
+        # Link reference
+        #
+        if "references" not in state.env:
+            return False
+
+        if pos < maximum and state.src[pos] == "[":
+            start = pos + 1
+            pos = state.md.helpers.parseLinkLabel(state, pos)
+            if pos >= 0:
+                label = state.src[start:pos]
+                pos += 1
+            else:
+                pos = labelEnd + 1
+
+        else:
+            pos = labelEnd + 1
+
+        # covers label == '' and label == undefined
+        # (collapsed reference link and shortcut reference link respectively)
+        if not label:
+            label = state.src[labelStart:labelEnd]
+
+        # Compatibility correction: explicit, collapsed and shortcut labels.
+        if len(label) > 999:
+            state.pos = oldPos
+            return False
+        label = normalizeReference(label)
+
+        ref = state.env["references"].get(label, None)
+        if not ref:
+            state.pos = oldPos
+            return False
+
+        href = ref["href"]
+        title = ref["title"]
+
+    #
+    # We found the end of the link, and know for a fact it's a valid link
+    # so all that's left to do is to call tokenizer.
+    #
+    if not silent:
+        state.pos = labelStart
+        state.posMax = labelEnd
+
+        token = state.push("link_open", "a", 1)
+        token.attrs = {"href": href}
+
+        if title:
+            token.attrSet("title", title)
+
+        # note, this is not part of markdown-it JS, but is useful for renderers
+        if label and state.md.options.get("store_labels", False):
+            token.meta["label"] = label
+
+        state.linkLevel += 1
+        state.md.inline.tokenize(state)
+        state.linkLevel -= 1
+
+        token = state.push("link_close", "a", -1)
+
+    state.pos = pos
+    state.posMax = maximum
+    return True
+
+
+def image(state: StateInline, silent: bool) -> bool:
+    label = None
+    href = ""
+    oldPos = state.pos
+    max = state.posMax
+
+    if state.src[state.pos] != "!":
+        return False
+
+    if state.pos + 1 < state.posMax and state.src[state.pos + 1] != "[":
+        return False
+
+    labelStart = state.pos + 2
+    labelEnd = state.md.helpers.parseLinkLabel(state, state.pos + 1, False)
+
+    # parser failed to find ']', so it's not a valid link
+    if labelEnd < 0:
+        return False
+
+    pos = labelEnd + 1
+
+    if pos < max and state.src[pos] == "(":
+        #
+        # Inline link
+        #
+
+        # [link](  <href>  "title"  )
+        #        ^^ skipping these spaces
+        pos += 1
+        while pos < max:
+            ch = state.src[pos]
+            if not isStrSpace(ch) and ch != "\n":
+                break
+            pos += 1
+
+        if pos >= max:
+            return False
+
+        # [link](  <href>  "title"  )
+        #          ^^^^^^ parsing link destination
+        start = pos
+        res = state.md.helpers.parseLinkDestination(state.src, pos, state.posMax)
+        if res.ok:
+            href = state.md.normalizeLink(res.str)
+            if state.md.validateLink(href):
+                pos = res.pos
+            else:
+                href = ""
+
+        # [link](  <href>  "title"  )
+        #                ^^ skipping these spaces
+        start = pos
+        while pos < max:
+            ch = state.src[pos]
+            if not isStrSpace(ch) and ch != "\n":
+                break
+            pos += 1
+
+        # [link](  <href>  "title"  )
+        #                  ^^^^^^^ parsing link title
+        res = state.md.helpers.parseLinkTitle(state.src, pos, state.posMax, None)
+        if pos < max and start != pos and res.ok:
+            title = res.str
+            pos = res.pos
+
+            # [link](  <href>  "title"  )
+            #                         ^^ skipping these spaces
+            while pos < max:
+                ch = state.src[pos]
+                if not isStrSpace(ch) and ch != "\n":
+                    break
+                pos += 1
+        else:
+            title = ""
+
+        if pos >= max or state.src[pos] != ")":
+            state.pos = oldPos
+            return False
+
+        pos += 1
+
+    else:
+        #
+        # Link reference
+        #
+        if "references" not in state.env:
+            return False
+
+        # /* [ */
+        if pos < max and state.src[pos] == "[":
+            start = pos + 1
+            pos = state.md.helpers.parseLinkLabel(state, pos)
+            if pos >= 0:
+                label = state.src[start:pos]
+                pos += 1
+            else:
+                pos = labelEnd + 1
+        else:
+            pos = labelEnd + 1
+
+        # covers label == '' and label == undefined
+        # (collapsed reference link and shortcut reference link respectively)
+        if not label:
+            label = state.src[labelStart:labelEnd]
+
+        # Compatibility correction: explicit, collapsed and shortcut labels.
+        if len(label) > 999:
+            state.pos = oldPos
+            return False
+        label = normalizeReference(label)
+
+        ref = state.env["references"].get(label, None)
+        if not ref:
+            state.pos = oldPos
+            return False
+
+        href = ref["href"]
+        title = ref["title"]
+
+    #
+    # We found the end of the link, and know for a fact it's a valid link
+    # so all that's left to do is to call tokenizer.
+    #
+    if not silent:
+        content = state.src[labelStart:labelEnd]
+
+        tokens: list[Token] = []
+        state.md.inline.parse(content, state.md, state.env, tokens)
+
+        token = state.push("image", "img", 0)
+        token.attrs = {"src": href, "alt": ""}
+        token.children = tokens or None
+        token.content = content
+
+        if title:
+            token.attrSet("title", title)
+
+        # note, this is not part of markdown-it JS, but is useful for renderers
+        if label and state.md.options.get("store_labels", False):
+            token.meta["label"] = label
+
+    state.pos = pos
+    state.posMax = max
+    return True
+
+
+def paragraph(state: StateBlock, startLine: int, endLine: int, silent: bool) -> bool:
+    LOGGER.debug(
+        "entering paragraph: %s, %s, %s, %s", state, startLine, endLine, silent
+    )
+
+    nextLine = startLine + 1
+    ruler = state.md.block.ruler
+    terminatorRules = ruler.getRules("paragraph")
+    endLine = state.lineMax
+
+    oldParentType = state.parentType
+    state.parentType = "paragraph"
+
+    # jump line-by-line until empty one or EOF
+    while nextLine < endLine:
+        if state.isEmpty(nextLine):
+            break
+        # this would be a code block normally, but after paragraph
+        # it's considered a lazy continuation regardless of what's there
+        if state.sCount[nextLine] - state.blkIndent > 3:
+            nextLine += 1
+            continue
+
+        # quirk for blockquotes, this line should already be checked by that rule
+        if state.sCount[nextLine] < 0:
+            nextLine += 1
+            continue
+
+        # Some tags can terminate paragraph without empty line.
+        terminate = False
+        for terminatorRule in terminatorRules:
+            if terminatorRule(state, nextLine, endLine, True):
+                terminate = True
+                break
+
+        if terminate:
+            break
+
+        nextLine += 1
+
+    content = state.getLines(startLine, nextLine, state.blkIndent, False).strip(" \t\r\n")
+
+    state.line = nextLine
+
+    token = state.push("paragraph_open", "p", 1)
+    token.map = [startLine, state.line]
+
+    token = state.push("inline", "", 0)
+    token.content = content
+    token.map = [startLine, state.line]
+    token.children = []
+
+    token = state.push("paragraph_close", "p", -1)
+
+    state.parentType = oldParentType
+
+    return True
+
+
+# HTML must be parsed so block ownership and hidden references are understood.
+# No GFM plugins: task-list markers remain ordinary paragraph text.
+PARSER = MarkdownIt("commonmark", {"html": True})
+PARSER.block.ruler.at("reference", reference)
+PARSER.block.ruler.at("paragraph", paragraph)
+PARSER.inline.ruler.at("link", link)
+PARSER.inline.ruler.at("image", image)
 
 
 def read_text(relative: str) -> str:
     path = ROOT / relative
-    if not path.is_file():
-        raise AssertionError(f"missing required file: {relative}")
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise AssertionError(f"missing required file: {relative}") from exc
+    except (UnicodeDecodeError, OSError) as exc:
+        raise AssertionError(f"cannot read required file: {relative}: {exc}") from exc
     if not text.strip():
         raise AssertionError(f"required file is empty: {relative}")
     return text
@@ -122,1239 +715,79 @@ def read_text(relative: str) -> str:
 def load_contract_texts() -> tuple[dict[str, str], list[str]]:
     texts: dict[str, str] = {}
     errors: list[str] = []
-
     for relative in REQUIRED_FILES:
         try:
             texts[relative] = read_text(relative)
         except AssertionError as exc:
             errors.append(str(exc))
-
     return texts, errors
 
 
-def _normalize_markdown_line_endings(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+def inline_prose(children: list[Token]) -> tuple[str, ...]:
+    """Project decoded text, preserving boundaries around excluded inline nodes.
 
+    The parser owns escapes, entities, emphasis eligibility and resolved links.
+    Code, images (including alt text), HTML and unknown nodes split the text;
+    they cannot disappear in a way that manufactures a required phrase.
+    """
+    parts: list[str] = []
+    blocks: list[str] = []
 
-def _markdown_lines(text: str) -> tuple[str, ...]:
-    normalized = _normalize_markdown_line_endings(text)
-    lines = normalized.split("\n")
-    if lines and normalized.endswith("\n"):
-        lines.pop()
-    return tuple(lines)
+    def flush() -> None:
+        text = re.sub(r"[ \t\r\n]+", " ", "".join(parts)).strip(" \t")
+        if text:
+            blocks.append(text)
+        parts.clear()
 
-
-def _column_at(
-    text: str, index: int, initial_column: int = 0
-) -> int:
-    column = initial_column
-    for char in text[:index]:
-        if char == "\t":
-            column += 4 - (column % 4)
+    for child in children:
+        if child.type == "text":
+            parts.append(child.content)
+        elif child.type in {"softbreak", "hardbreak"}:
+            parts.append(" ")
+        elif child.type in {
+            "em_open", "em_close", "strong_open", "strong_close",
+            "link_open", "link_close",
+        }:
+            continue
         else:
-            column += 1
-    return column
+            flush()
+    flush()
+    return tuple(blocks)
 
 
-def _list_match(line: str) -> re.Match[str] | None:
-    return LIST_ITEM_RE.match(line)
+def parse_document(text: str) -> Document:
+    """One parse provides block ownership, references, headings and prose.
 
-
-def _list_can_interrupt_paragraph(line: str) -> bool:
-    match = _list_match(line)
-    if match is None:
-        return False
-
-    if not line[match.end() :].strip(" \t"):
-        return False
-
-    if match.group("bullet") is not None:
-        return True
-    return int(match.group("number")) == 1
-
-
-def _list_marker_content(
-    line: str,
-    paragraph_open: bool = False,
-    initial_column: int = 0,
-) -> tuple[int, str] | None:
-    """Return absolute visual content column and content after one list marker."""
-    match = _list_match(line)
-    if match is None:
-        return None
-
-    if paragraph_open and not _list_can_interrupt_paragraph(line):
-        return None
-
-    spacing_start = match.start("spacing")
-    spacing_end = match.end("spacing")
-    marker_end_column = _column_at(
-        line, spacing_start, initial_column=initial_column
-    )
-    spacing_end_column = _column_at(
-        line, spacing_end, initial_column=initial_column
-    )
-    padding_columns = spacing_end_column - marker_end_column
-
-    if padding_columns <= 4:
-        return spacing_end_column, line[spacing_end:]
-
-    # Five or more visual columns: consume exactly one visual column as
-    # list padding and preserve any residual tab expansion as indentation.
-    content_column = marker_end_column + 1
-    content = _strip_columns_prefix(
-        line[spacing_start:],
-        1,
-        initial_column=marker_end_column,
-    )
-    if content is None:
-        return None
-
-    return content_column, content
-
-def _list_item_context_details(
-    line: str, paragraph_open: bool = False
-) -> tuple[int, str, tuple[str, ...]] | None:
-    """Return innermost column/content plus explicit list-container identity."""
-    segment = line
-    base_column = 0
-    context: tuple[int, str, tuple[str, ...]] | None = None
-    signature: list[str] = []
-    first_marker = True
-
-    while True:
-        if THEMATIC_BREAK_RE.match(segment):
-            return context
-
-        marker_content = _list_marker_content(
-            segment,
-            paragraph_open=paragraph_open if first_marker else False,
-            initial_column=base_column,
-        )
-        if marker_content is None:
-            return context
-
-        content_column, content = marker_content
-        if not content.strip(" \t"):
-            return context
-
-        signature.append("list")
-        base_column = content_column
-        context = (base_column, content, tuple(signature))
-        segment = content
-        first_marker = False
-
-
-def _list_item_context(
-    line: str, paragraph_open: bool = False
-) -> tuple[int, str] | None:
-    details = _list_item_context_details(
-        line, paragraph_open=paragraph_open
-    )
-    if details is None:
-        return None
-    column, content, _signature = details
-    return column, content
-
-def _list_content_column(
-    line: str, paragraph_open: bool = False
-) -> int | None:
-    context = _list_item_context(line, paragraph_open=paragraph_open)
-    if context is None:
-        return None
-    return context[0]
-
-
-def _strip_columns_prefix(
-    line: str, columns: int, initial_column: int = 0
-) -> str | None:
-    column = initial_column
-    target_column = initial_column + columns
-    index = 0
-
-    while index < len(line) and column < target_column:
-        char = line[index]
-        if char == " ":
-            column += 1
-            index += 1
+    Only level-2 ATX headings count toward inventories; Setext headings are
+    intentionally ineligible. ATX headings at any level can supply prose.
+    Separate leaf blocks and excluded inline nodes never join into a phrase.
+    """
+    tokens = PARSER.parse(text)
+    headings: list[Heading] = []
+    prose: list[ProseBlock] = []
+    for index, token in enumerate(tokens):
+        if token.type != "inline":
             continue
-
-        if char == "\t":
-            next_column = column + 4 - (column % 4)
-            if next_column > target_column:
-                overshoot = next_column - target_column
-                return (" " * overshoot) + line[index + 1 :]
-            column = next_column
-            index += 1
+        owner = tokens[index - 1]
+        atx = owner.type == "heading_open" and owner.markup.startswith("#")
+        if owner.type != "paragraph_open" and not atx:
             continue
+        line = (token.map or owner.map or [0])[0] + 1
+        segments = inline_prose(token.children or [])
+        prose.extend(ProseBlock(segment, line) for segment in segments)
+        if atx and owner.tag == "h2" and segments:
+            headings.append(Heading("\n".join(segments), line))
+    return Document(tuple(headings), tuple(prose))
 
-        return None
-
-    if column < target_column:
-        return None
-
-    return line[index:]
-
-def _quote_marker_content(
-    line: str, initial_column: int = 0
-) -> tuple[int, str] | None:
-    column = initial_column
-    index = 0
-
-    while index < len(line) and line[index] in " \t":
-        char = line[index]
-        if char == " ":
-            next_column = column + 1
-        else:
-            next_column = column + 4 - (column % 4)
-
-        if next_column - initial_column > 3:
-            break
-
-        column = next_column
-        index += 1
-
-    if index >= len(line) or line[index] != ">":
-        return None
-
-    marker_column = column + 1
-    remainder = line[index + 1 :]
-
-    if remainder.startswith((" ", "\t")):
-        content = _strip_columns_prefix(
-            remainder,
-            1,
-            initial_column=marker_column,
-        )
-        assert content is not None
-        return marker_column + 1, content
-
-    return marker_column, remainder
-
-
-def _strip_quote_prefixes(
-    line: str, count: int | None = None
-) -> tuple[int, str] | None:
-    content = line
-    stripped_count = 0
-
-    base_column = 0
-    while count is None or stripped_count < count:
-        quote = _quote_marker_content(
-            content, initial_column=base_column
-        )
-        if quote is None:
-            break
-        base_column, content = quote
-        stripped_count += 1
-
-    if count is not None and stripped_count != count:
-        return None
-
-    return stripped_count, content
-
-
-def _container_content_identity(
-    line: str, paragraph_open: bool = False
-) -> tuple[int, str, bool, tuple[str, ...]]:
-    """Return prefix width, content, inner paragraph state, and identity."""
-    content = line
-    base_column = 0
-    inner_paragraph_open = paragraph_open
-    signature: list[str] = []
-
-    while True:
-        quote = _quote_marker_content(
-            content, initial_column=base_column
-        )
-        if quote is not None:
-            base_column, content = quote
-            signature.append("quote")
-            inner_paragraph_open = False
-            continue
-
-        details = _list_item_context_details(
-            content, paragraph_open=inner_paragraph_open
-        )
-        if details is not None:
-            column, nested, list_signature = details
-            # list context columns are absolute from the current base.
-            if base_column:
-                column += base_column
-            base_column = column
-            content = nested
-            signature.extend(list_signature)
-            inner_paragraph_open = False
-            continue
-
-        return (
-            base_column,
-            content,
-            inner_paragraph_open,
-            tuple(signature),
-        )
-
-
-def _container_content_state(
-    line: str, paragraph_open: bool = False
-) -> tuple[int, str, bool]:
-    column, content, inner_paragraph_open, _signature = (
-        _container_content_identity(
-            line, paragraph_open=paragraph_open
-        )
-    )
-    return column, content, inner_paragraph_open
-
-
-def _container_content(
-    line: str, paragraph_open: bool = False
-) -> tuple[int, str]:
-    column, content, _paragraph_open, _signature = (
-        _container_content_identity(
-            line, paragraph_open=paragraph_open
-        )
-    )
-    return column, content
-
-
-def _container_scoped_content(
-    line: str,
-    container_column: int,
-    container_signature: tuple[str, ...],
-) -> str | None:
-    """Return content only when the opener's Markdown container continues."""
-    if not container_signature and container_column <= 0:
-        return line
-
-    (
-        structural_column,
-        structural_content,
-        _paragraph_open,
-        structural_signature,
-    ) = _container_content_identity(line, paragraph_open=False)
-
-    if structural_signature:
-        if structural_signature == container_signature:
-            if "list" in structural_signature:
-                return None
-            return structural_content
-
-        # A mixed container may repeat its explicit quote prefix while
-        # continuing an inner list purely by indentation.
-        prefix_length = len(structural_signature)
-        if (
-            container_signature[:prefix_length]
-            == structural_signature
-            and structural_signature
-            and all(
-                marker == "quote"
-                for marker in structural_signature
-            )
-            and all(
-                marker == "list"
-                for marker in container_signature[prefix_length:]
-            )
-        ):
-            remaining_columns = (
-                container_column - structural_column
-            )
-            if (
-                remaining_columns >= 0
-                and _leading_columns(structural_content)
-                >= remaining_columns
-            ):
-                return _strip_columns_prefix(
-                    structural_content,
-                    remaining_columns,
-                    initial_column=structural_column,
-                )
-        return None
-
-    # List continuations commonly omit the list marker and continue by
-    # indentation. Quotes, by contrast, require their explicit marker.
-    if container_signature and all(
-        marker == "list" for marker in container_signature
-    ):
-        if _leading_columns(line) >= container_column:
-            return _strip_columns_prefix(line, container_column)
-
-    return None
-
-def _container_reference_definition_end(
-    lines: tuple[str, ...],
-    start: int,
-    paragraph_open: bool = False,
-) -> int | None:
-    (
-        container_column,
-        first_content,
-        inner_paragraph_open,
-        container_signature,
-    ) = _container_content_identity(
-        lines[start], paragraph_open=paragraph_open
-    )
-    if inner_paragraph_open:
-        return None
-
-    virtual_lines = [first_content]
-    cursor = start + 1
-
-    while cursor < len(lines):
-        line = lines[cursor]
-        if not line.strip(" \t"):
-            virtual_lines.append("")
-            break
-
-        scoped = _container_scoped_content(
-            line, container_column, container_signature
-        )
-        if scoped is None:
-            break
-
-        virtual_lines.append(scoped)
-        cursor += 1
-
-    definition_end = _reference_definition_end(
-        tuple(virtual_lines), 0
-    )
-    if definition_end is None:
-        return None
-
-    return start + definition_end
-
-
-def _list_reference_definition_end(
-    lines: tuple[str, ...], start: int
-) -> int | None:
-    context = _list_item_context(lines[start])
-    if context is None:
-        return None
-
-    content_column, content = context
-    virtual_lines = [content]
-    cursor = start + 1
-
-    while cursor < len(lines):
-        line = lines[cursor]
-        if not line.strip(" \t"):
-            virtual_lines.append("")
-            break
-
-        stripped = _strip_columns_prefix(line, content_column)
-        if stripped is None:
-            break
-
-        virtual_lines.append(stripped)
-        cursor += 1
-
-    definition_end = _reference_definition_end(tuple(virtual_lines), 0)
-    if definition_end is None:
-        return None
-
-    return start + definition_end
-
-
-def _list_item_is_reference_definition(line: str) -> bool:
-    context = _list_item_context(line)
-    if context is None:
-        return False
-
-    _column, content = context
-    return _reference_definition_end((content,), 0) == 1
-
-
-def _list_item_starts_paragraph(line: str) -> bool:
-    context = _list_item_context(line)
-    if context is None:
-        return False
-
-    _column, content = context
-    if _reference_definition_end((content,), 0) is not None:
-        return False
-
-    return _line_starts_paragraph_block(content)
-
-def _fence_open_details(
-    line: str, paragraph_open: bool = False
-) -> tuple[str, int, tuple[str, ...]] | None:
-    """Return marker, container column, and container identity."""
-    match = FENCE_OPEN_RE.match(line)
-    if match:
-        marker = match.group(1)
-        info = match.group(2)
-        if marker[0] == "`" and "`" in info:
-            return None
-        return marker, 0, ()
-
-    (
-        container_column,
-        content,
-        _inner_paragraph_open,
-        signature,
-    ) = _container_content_identity(
-        line, paragraph_open=paragraph_open
-    )
-    if container_column == 0:
-        return None
-
-    match = FENCE_OPEN_RE.match(content)
-    if match is None:
-        return None
-
-    marker = match.group(1)
-    info = match.group(2)
-    if marker[0] == "`" and "`" in info:
-        return None
-
-    return marker, container_column, signature
-
-
-def _fence_open(
-    line: str, paragraph_open: bool = False
-) -> tuple[str, int] | None:
-    details = _fence_open_details(
-        line, paragraph_open=paragraph_open
-    )
-    if details is None:
-        return None
-    marker, container_column, _signature = details
-    return marker, container_column
-
-def _leading_columns(line: str) -> int:
-    index = 0
-    while index < len(line) and line[index] in " \t":
-        index += 1
-    return _column_at(line, index)
-
-
-def _fence_close(
-    line: str, marker_char: str, marker_len: int, base_indent: int
-) -> bool:
-    min_indent = base_indent
-    max_indent = base_indent + 3
-    leading = _leading_columns(line)
-    if leading < min_indent or leading > max_indent:
-        return False
-
-    stripped = line.lstrip(" \t")
-    match = re.fullmatch(
-        rf"(?P<marker>{re.escape(marker_char)}{{{marker_len},}})[ \t]*",
-        stripped,
-    )
-    return match is not None
-
-def _backtick_run_end(text: str, start: int) -> int:
-    end = start
-    while end < len(text) and text[end] == "`":
-        end += 1
-    return end
-
-
-def _is_escaped(text: str, index: int) -> bool:
-    backslashes = 0
-    cursor = index - 1
-    while cursor >= 0 and text[cursor] == "\\":
-        backslashes += 1
-        cursor -= 1
-    return backslashes % 2 == 1
-
-
-def _line_prefix(text: str, index: int) -> str:
-    line_start = text.rfind("\n", 0, index) + 1
-    return text[line_start:index]
-
-
-def _backtick_run_is_fence_candidate(
-    text: str, start: int, run_length: int
-) -> bool:
-    if run_length < 3 or _is_escaped(text, start):
-        return False
-
-    prefix = _line_prefix(text, start)
-    if re.fullmatch(r" {0,3}", prefix):
-        return True
-
-    return re.fullmatch(
-        r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+ {0,3}",
-        prefix,
-    ) is not None
-
-
-def _line_interrupts_inline_block(line: str) -> bool:
-    if not line.strip(" \t"):
-        return True
-
-    if ATX_HEADING_RE.match(line):
-        return True
-
-    if THEMATIC_BREAK_RE.match(line):
-        return True
-
-    if _fence_open(line, paragraph_open=True) is not None:
-        return True
-
-    if re.match(r"^ {0,3}>", line):
-        return True
-
-    if _list_can_interrupt_paragraph(line):
-        return True
-
-    raw_html = _raw_html_block_start(line, allow_generic=False)
-    return raw_html is not None
-
-
-def _inline_opener_quote_depth(
-    text: str, opener_start: int
-) -> int:
-    line_start = text.rfind("\n", 0, opener_start) + 1
-    prefix = text[line_start:opener_start]
-    quote_state = _strip_quote_prefixes(prefix)
-    assert quote_state is not None
-    quote_depth, _content = quote_state
-    if quote_depth:
-        return quote_depth
-
-    cursor = line_start - 1
-    while cursor >= 0:
-        previous_start = text.rfind("\n", 0, cursor) + 1
-        previous = text[previous_start:cursor]
-
-        if not previous.strip(" \t"):
-            return 0
-
-        previous_quote = _strip_quote_prefixes(previous)
-        assert previous_quote is not None
-        previous_depth, previous_content = previous_quote
-        if previous_depth:
-            if (
-                _line_starts_paragraph_block(previous_content)
-                or not _line_interrupts_inline_block(previous_content)
-            ):
-                return previous_depth
-            return 0
-
-        if _line_interrupts_inline_block(previous):
-            return 0
-
-        cursor = previous_start - 1
-
-    return 0
-
-
-def _inline_block_end(
-    text: str, opener_start: int, opener_end: int
-) -> int:
-    opener_quote_depth = _inline_opener_quote_depth(
-        text, opener_start
-    )
-
-    cursor = text.find("\n", opener_end)
-    if cursor == -1:
-        return len(text)
-
-    while cursor < len(text):
-        next_start = cursor + 1
-        next_end = text.find("\n", next_start)
-        if next_end == -1:
-            next_end = len(text)
-
-        line = text[next_start:next_end]
-        probe = line
-        if opener_quote_depth:
-            scoped_quote = _strip_quote_prefixes(
-                line, opener_quote_depth
-            )
-            if scoped_quote is not None:
-                _depth, probe = scoped_quote
-
-        if _line_interrupts_inline_block(probe):
-            return next_start
-
-        if next_end == len(text):
-            return len(text)
-        cursor = next_end
-
-    return len(text)
-
-
-def _matching_code_span_end(
-    text: str, opener_start: int, opener_end: int
-) -> int | None:
-    run_length = opener_end - opener_start
-    limit = _inline_block_end(
-        text, opener_start, opener_end
-    )
-    cursor = opener_end
-
-    while cursor < limit:
-        tick = text.find("`", cursor, limit)
-        if tick == -1:
-            return None
-
-        run_end = _backtick_run_end(text, tick)
-        candidate_length = run_end - tick
-        if (
-            candidate_length == run_length
-            and not _backtick_run_is_fence_candidate(
-                text, tick, candidate_length
-            )
-        ):
-            return run_end
-        cursor = run_end
-
-    return None
-
-
-def _mask_code_spans(text: str) -> tuple[str, ...]:
-    """Mask matched code spans without crossing inline-block boundaries."""
-    chars = list(text)
-    cursor = 0
-
-    while cursor < len(text):
-        tick = text.find("`", cursor)
-        if tick == -1:
-            break
-
-        if _is_escaped(text, tick):
-            cursor = tick + 1
-            continue
-
-        opener_end = _backtick_run_end(text, tick)
-        run_length = opener_end - tick
-        if _backtick_run_is_fence_candidate(text, tick, run_length):
-            cursor = opener_end
-            continue
-
-        code_end = _matching_code_span_end(text, tick, opener_end)
-        if code_end is None:
-            cursor = opener_end
-            continue
-
-        line_has_sentinel = False
-        for index in range(tick, code_end):
-            if chars[index] == "\n":
-                line_has_sentinel = False
-                continue
-            chars[index] = " "
-            if not line_has_sentinel:
-                chars[index] = "x"
-                line_has_sentinel = True
-
-        cursor = code_end
-
-    return _markdown_lines("".join(chars))
-
-def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
-    """Mask HTML comments after code-span content has been protected."""
-    chars = list(line)
-    cursor = 0
-
-    while cursor < len(line):
-        if in_comment:
-            end = line.find("-->", cursor)
-            if end == -1:
-                for index in range(cursor, len(chars)):
-                    chars[index] = " "
-                return "".join(chars), True
-
-            for index in range(cursor, end + 3):
-                chars[index] = " "
-            cursor = end + 3
-            in_comment = False
-            continue
-
-        comment_start = line.find("<!--", cursor)
-        if comment_start == -1:
-            break
-
-        end = line.find("-->", comment_start + 4)
-        if end == -1:
-            for index in range(comment_start, len(chars)):
-                chars[index] = " "
-            return "".join(chars), True
-
-        for index in range(comment_start, end + 3):
-            chars[index] = " "
-        cursor = end + 3
-
-    return "".join(chars), in_comment
-
-def _raw_html_block_start(
-    line: str, allow_generic: bool = True
-) -> tuple[str, str | None] | None:
-    """Return the raw-HTML block mode and terminator, if one starts here."""
-    type1 = RAW_HTML_TYPE1_OPEN_RE.match(line)
-    if type1:
-        return "tag", type1.group("tag").lower()
-
-    if re.match(r"^ {0,3}<\?", line):
-        return "marker", "?>"
-
-    if re.match(r"^ {0,3}<!\[CDATA\[", line):
-        return "marker", "]]>"
-
-    if re.match(r"^ {0,3}<![A-Z]", line):
-        return "marker", ">"
-
-    if RAW_HTML_BLOCK_TAG_RE.match(line):
-        return "blank", None
-
-    if allow_generic and (
-        RAW_HTML_GENERIC_OPEN_TAG_RE.match(line)
-        or RAW_HTML_GENERIC_CLOSE_TAG_RE.match(line)
-    ):
-        return "blank", None
-
-    return None
-
-
-def _raw_html_container_content(
-    line: str,
-    container_column: int,
-    container_signature: tuple[str, ...],
-) -> str | None:
-    """Return content while the exact raw-HTML container remains active."""
-    return _container_scoped_content(
-        line, container_column, container_signature
-    )
-
-def _raw_html_block_ends(line: str, mode: str, terminator: str | None) -> bool:
-    if mode == "blank":
-        return not line.strip(" \t")
-
-    if mode == "marker":
-        assert terminator is not None
-        return terminator in line
-
-    if mode == "tag":
-        assert terminator is not None
-        return re.search(
-            rf"</{re.escape(terminator)}>",
-            line,
-            re.IGNORECASE,
-        ) is not None
-
-    raise AssertionError(f"unknown raw HTML block mode: {mode}")
-
-
-def _line_starts_paragraph_block(line: str) -> bool:
-    if not line.strip(" \t"):
-        return False
-
-    if ATX_HEADING_RE.match(line):
-        return False
-
-    if THEMATIC_BREAK_RE.match(line):
-        return False
-
-    if re.match(r"^ {0,3}>", line):
-        return False
-
-    if re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", line):
-        return False
-
-    if line.startswith("    "):
-        return False
-
-    return True
-
-
-def _paragraph_state_after(line: str, was_open: bool) -> bool:
-    if not line.strip(" \t"):
-        return False
-
-    if was_open and SETEXT_UNDERLINE_RE.match(line):
-        return False
-
-    if was_open and line.startswith("    "):
-        return True
-
-    if was_open and not _line_interrupts_inline_block(line):
-        return True
-
-    return _line_starts_paragraph_block(line)
-
-def _markdown_visible_records(
-    text: str,
-) -> tuple[tuple[str, bool, int], ...]:
-    """Return visible lines with paragraph state and owning quote depth."""
-    normalized_text = _normalize_markdown_line_endings(text)
-    raw_lines = _markdown_lines(normalized_text)
-    code_safe_lines = _mask_code_spans(normalized_text)
-    if len(code_safe_lines) != len(raw_lines):
-        raise AssertionError("code-span masking changed line structure")
-
-    records: list[tuple[str, bool, int]] = []
-    fence_char: str | None = None
-    fence_len = 0
-    fence_container_column = 0
-    fence_container_signature: tuple[str, ...] = ()
-    in_html_comment = False
-    comment_container_column = 0
-    comment_container_signature: tuple[str, ...] = ()
-    comment_allows_lazy_continuation = False
-    raw_html_mode: str | None = None
-    raw_html_terminator: str | None = None
-    raw_html_container_column = 0
-    raw_html_container_signature: tuple[str, ...] = ()
-    paragraph_open = False
-    paragraph_quote_depth = 0
-    list_paragraph_column: int | None = None
-    list_paragraph_quote_depth = 0
-    list_paragraph_allows_lazy_dedent = False
-    index = 0
-
-    while index < len(raw_lines):
-        raw_line = raw_lines[index]
-        code_safe_line = code_safe_lines[index]
-
-        if list_paragraph_column is not None:
-            scoped_quote = _strip_quote_prefixes(
-                raw_line, list_paragraph_quote_depth
-            )
-            if scoped_quote is None:
-                if not list_paragraph_allows_lazy_dedent:
-                    paragraph_open = False
-                list_paragraph_column = None
-                list_paragraph_quote_depth = 0
-                list_paragraph_allows_lazy_dedent = False
-            else:
-                _quote_depth, list_line = scoped_quote
-                if not list_line.strip(" \t"):
-                    paragraph_open = False
-                    list_paragraph_column = None
-                    list_paragraph_quote_depth = 0
-                    list_paragraph_allows_lazy_dedent = False
-                elif _leading_columns(list_line) < list_paragraph_column:
-                    if (
-                        _line_interrupts_inline_block(list_line)
-                        or not list_paragraph_allows_lazy_dedent
-                    ):
-                        paragraph_open = False
-                        paragraph_quote_depth = 0
-                    else:
-                        # The list container ended, but the paragraph
-                        # continues lazily in the same outer quote.
-                        paragraph_quote_depth = (
-                            list_paragraph_quote_depth
-                        )
-                    list_paragraph_column = None
-                    list_paragraph_quote_depth = 0
-                    list_paragraph_allows_lazy_dedent = False
-                elif list_line.strip():
-                    list_paragraph_allows_lazy_dedent = True
-
-        if fence_char is not None:
-            block_line = _container_scoped_content(
-                raw_line,
-                fence_container_column,
-                fence_container_signature,
-            )
-            if (
-                fence_container_signature
-                and block_line is None
-                and (
-                    raw_line.strip(" \t")
-                    or "quote" in fence_container_signature
-                )
-            ):
-                fence_char = None
-                fence_len = 0
-                fence_container_column = 0
-                fence_container_signature = ()
-                paragraph_open = False
-            else:
-                if block_line is None:
-                    block_line = raw_line
-                if _fence_close(
-                    block_line, fence_char, fence_len, 0
-                ):
-                    fence_char = None
-                    fence_len = 0
-                    fence_container_column = 0
-                    fence_container_signature = ()
-                index += 1
-                continue
-
-        if raw_html_mode is not None:
-            block_line = _raw_html_container_content(
-                code_safe_line,
-                raw_html_container_column,
-                raw_html_container_signature,
-            )
-            if (
-                raw_html_container_signature
-                and block_line is None
-                and (
-                    raw_line.strip(" \t")
-                    or "quote" in raw_html_container_signature
-                )
-            ):
-                raw_html_mode = None
-                raw_html_terminator = None
-                raw_html_container_column = 0
-                raw_html_container_signature = ()
-                paragraph_open = False
-            else:
-                if block_line is None:
-                    block_line = code_safe_line
-
-                if _raw_html_block_ends(
-                    block_line, raw_html_mode, raw_html_terminator
-                ):
-                    if raw_html_mode == "blank":
-                        records.append(("", False, 0))
-                    raw_html_mode = None
-                    raw_html_terminator = None
-                    raw_html_container_column = 0
-                    raw_html_container_signature = ()
-                    paragraph_open = False
-                list_paragraph_column = None
-                list_paragraph_quote_depth = 0
-                list_paragraph_allows_lazy_dedent = False
-                index += 1
-                continue
-
-        if in_html_comment and comment_container_signature:
-            scoped = _container_scoped_content(
-                code_safe_line,
-                comment_container_column,
-                comment_container_signature,
-            )
-            lazy_comment_continuation = (
-                scoped is None
-                and comment_allows_lazy_continuation
-                and "quote" in comment_container_signature
-                and bool(raw_line.strip(" \t"))
-                and not _line_interrupts_inline_block(raw_line)
-            )
-            if (
-                scoped is None
-                and not lazy_comment_continuation
-                and (
-                    raw_line.strip(" \t")
-                    or "quote" in comment_container_signature
-                )
-            ):
-                in_html_comment = False
-                comment_container_column = 0
-                comment_container_signature = ()
-                comment_allows_lazy_continuation = False
-                paragraph_open = False
-
-        if not in_html_comment:
-            fence = _fence_open_details(
-                raw_line, paragraph_open=paragraph_open
-            )
-            if fence is not None:
-                marker, container_column, signature = fence
-                fence_char = marker[0]
-                fence_len = len(marker)
-                fence_container_column = container_column
-                fence_container_signature = signature
-                records.append(("", False, 0))
-                paragraph_open = False
-                list_paragraph_column = None
-                list_paragraph_quote_depth = 0
-                list_paragraph_allows_lazy_dedent = False
-                index += 1
-                continue
-
-        was_in_html_comment = in_html_comment
-        visible_line, in_html_comment = _mask_html_comments(
-            code_safe_line, in_html_comment
-        )
-        if in_html_comment and not was_in_html_comment:
-            (
-                comment_container_column,
-                _comment_content,
-                _comment_paragraph,
-                comment_container_signature,
-            ) = _container_content_identity(
-                raw_line, paragraph_open=paragraph_open
-            )
-            _visible_column, visible_comment_prefix = (
-                _container_content(visible_line)
-            )
-            comment_allows_lazy_continuation = (
-                paragraph_open
-                or bool(visible_comment_prefix.strip(" \t"))
-            )
-
-        if in_html_comment:
-            records.append(
-                (
-                    visible_line,
-                    paragraph_open,
-                    (
-                        paragraph_quote_depth
-                        if paragraph_open
-                        else 0
-                    ),
-                )
-            )
-            if not visible_line.strip(" \t"):
-                paragraph_open = False
-            index += 1
-            continue
-
-        if was_in_html_comment and not in_html_comment:
-            comment_container_column = 0
-            comment_container_signature = ()
-            comment_allows_lazy_continuation = False
-
-        if not paragraph_open:
-            definition_end = _container_reference_definition_end(
-                code_safe_lines, index, paragraph_open=False
-            )
-            if definition_end is not None:
-                paragraph_open = False
-                list_paragraph_column = None
-                list_paragraph_quote_depth = 0
-                list_paragraph_allows_lazy_dedent = False
-                index = definition_end
-                continue
-
-        (
-            container_column,
-            block_content,
-            inner_paragraph_open,
-            container_signature,
-        ) = _container_content_identity(
-            visible_line, paragraph_open=paragraph_open
-        )
-        raw_html = _raw_html_block_start(
-            block_content, allow_generic=not inner_paragraph_open
-        )
-        if raw_html is not None:
-            mode, terminator = raw_html
-            if not _raw_html_block_ends(block_content, mode, terminator):
-                raw_html_mode = mode
-                raw_html_terminator = terminator
-                raw_html_container_column = container_column
-                raw_html_container_signature = container_signature
-            records.append(("", False, 0))
-            paragraph_open = False
-            index += 1
-            continue
-
-        records.append(
-                (
-                    visible_line,
-                    paragraph_open,
-                    (
-                        paragraph_quote_depth
-                        if paragraph_open
-                        else 0
-                    ),
-                )
-            )
-        quote_state = _strip_quote_prefixes(visible_line)
-        assert quote_state is not None
-        quote_depth, list_source = quote_state
-
-        same_list_container = (
-            list_paragraph_column is not None
-            and quote_depth == list_paragraph_quote_depth
-        )
-        effective_paragraph_open = (
-            paragraph_open
-            if quote_depth == 0 or same_list_container
-            else False
-        )
-
-        list_content_column = _list_content_column(
-            list_source, paragraph_open=effective_paragraph_open
-        )
-        if list_content_column is not None:
-            context = _list_item_context(
-                list_source,
-                paragraph_open=effective_paragraph_open,
-            )
-            paragraph_open = _list_item_starts_paragraph(
-                list_source
-            )
-            if paragraph_open and context is not None:
-                paragraph_quote_depth = quote_depth
-                list_paragraph_column = context[0]
-                list_paragraph_quote_depth = quote_depth
-                list_paragraph_allows_lazy_dedent = bool(
-                    context[1].strip()
-                )
-            else:
-                paragraph_quote_depth = 0
-                list_paragraph_column = None
-                list_paragraph_quote_depth = 0
-                list_paragraph_allows_lazy_dedent = False
-        else:
-            paragraph_open = _paragraph_state_after(
-                visible_line, effective_paragraph_open
-            )
-            paragraph_quote_depth = (
-                quote_depth if paragraph_open else 0
-            )
-        index += 1
-
-    return tuple(records)
-
-def markdown_visible_lines(text: str) -> tuple[str, ...]:
-    return tuple(
-        line
-        for line, _paragraph_open, _paragraph_quote_depth
-        in _markdown_visible_records(text)
-    )
-
-def markdown_visible_text(text: str) -> str:
-    return "\n".join(markdown_visible_lines(text))
 
 
 def markdown_level2_headings(text: str) -> tuple[str, ...]:
-    """Return rendered level-2 ATX headings from visible Markdown."""
-    headings: list[str] = []
+    return tuple(heading.title for heading in parse_document(text).headings)
 
-    for (
-        line,
-        paragraph_open,
-        paragraph_quote_depth,
-    ) in _markdown_visible_records(text):
-        quote_state = _strip_quote_prefixes(line)
-        assert quote_state is not None
-        quote_depth, paragraph_line = quote_state
-
-        paragraph_applies_here = (
-            paragraph_open
-            and quote_depth == paragraph_quote_depth
-        )
-        if paragraph_applies_here:
-            if (
-                _list_match(paragraph_line) is not None
-                and not _list_can_interrupt_paragraph(paragraph_line)
-            ):
-                continue
-
-        _container_column, heading_line, _inner_paragraph = (
-            _container_content_state(
-                line,
-                paragraph_open=paragraph_applies_here,
-            )
-        )
-        heading_match = ATX_HEADING_RE.match(heading_line)
-        if not heading_match or len(heading_match.group(1)) != 2:
-            continue
-
-        heading = (heading_match.group(2) or "").strip(" \t")
-        heading = re.sub(r"[ \t]+#+[ \t]*$", "", heading).rstrip()
-        if heading:
-            headings.append(heading)
-
-    return tuple(headings)
 
 def hypothesis_headings(text: str) -> tuple[str, ...]:
-    return tuple(
-        heading
-        for heading in markdown_level2_headings(text)
-        if HYPOTHESIS_HEADING_RE.fullmatch(heading)
-    )
+    return tuple(h for h in markdown_level2_headings(text)
+                 if HYPOTHESIS_HEADING_RE.fullmatch(h))
 
 
 def terminology_headings(text: str) -> tuple[str, ...]:
@@ -1362,964 +795,13 @@ def terminology_headings(text: str) -> tuple[str, ...]:
 
 
 def invariant_headings(text: str) -> tuple[str, ...]:
-    return tuple(
-        heading
-        for heading in markdown_level2_headings(text)
-        if INVARIANT_HEADING_RE.fullmatch(heading)
-    )
-
-
-def _link_reference_remainder(line: str) -> str | None:
-    leading = len(line) - len(line.lstrip(" "))
-    if leading > 3:
-        return None
-
-    stripped = line[leading:]
-    if not stripped.startswith("["):
-        return None
-
-    cursor = 1
-    while cursor + 1 < len(stripped):
-        char = stripped[cursor]
-
-        if char == "[" and not _is_escaped(stripped, cursor):
-            return None
-
-        if char == "]" and not _is_escaped(stripped, cursor):
-            if cursor <= 1:
-                return None
-            label = stripped[1:cursor]
-            if not label.strip() or len(label) > 999:
-                return None
-            if stripped[cursor + 1] != ":":
-                return None
-            return stripped[cursor + 2 :].strip(" \t")
-
-        cursor += 1
-
-    return None
-
-
-def _reference_title_end_from_initial(
-    initial: str, lines: tuple[str, ...], next_index: int
-) -> int | None:
-    """Return first line after a valid title starting in initial text."""
-    current = initial.strip(" \t")
-    if not current:
-        return None
-
-    opener = current[0]
-    closer = {
-        '"': '"',
-        "'": "'",
-        "(": ")",
-    }.get(opener)
-    if closer is None:
-        return None
-
-    cursor = 1
-    line_index = next_index - 1
-
-    while True:
-        while cursor < len(current):
-            char = current[cursor]
-            if char == closer and not _is_escaped(current, cursor):
-                if current[cursor + 1 :].strip(" \t"):
-                    return None
-                return line_index + 1
-            if (
-                opener == "("
-                and char == "("
-                and not _is_escaped(current, cursor)
-            ):
-                return None
-            cursor += 1
-
-        if next_index >= len(lines):
-            return None
-
-        current = lines[next_index]
-        if not current.strip(" \t"):
-            return None
-
-        line_index = next_index
-        next_index += 1
-        cursor = 0
-
-
-def _reference_title_end(
-    lines: tuple[str, ...], start: int
-) -> int | None:
-    """Return first line after a valid possibly-multiline link title."""
-    if start >= len(lines):
-        return None
-
-    first = lines[start]
-    leading = len(first) - len(first.lstrip(" "))
-    if leading > 3:
-        return None
-
-    return _reference_title_end_from_initial(
-        first[leading:], lines, start + 1
-    )
-
-
-def _reference_title_line(line: str) -> bool:
-    return _reference_title_end_from_initial(line, (), 0) == 0
-
-
-def _split_reference_destination(text: str) -> tuple[bool, str]:
-    """Return (valid destination, remaining title text)."""
-    if not text:
-        return False, ""
-
-    if text.startswith("<"):
-        cursor = 1
-        while cursor < len(text):
-            char = text[cursor]
-            if char == ">" and not _is_escaped(text, cursor):
-                tail = text[cursor + 1 :]
-                if tail and tail[0] not in " \t":
-                    return False, ""
-                return True, tail.strip(" \t")
-            if char == "<" and not _is_escaped(text, cursor):
-                return False, ""
-            if (
-                char == "\\"
-                and cursor + 1 < len(text)
-                and text[cursor + 1] in string.punctuation
-            ):
-                cursor += 2
-                continue
-            cursor += 1
-        return False, ""
-
-    depth = 0
-    cursor = 0
-    while cursor < len(text):
-        char = text[cursor]
-
-        if char == "\\" and cursor + 1 < len(text):
-            if text[cursor + 1] in string.punctuation:
-                cursor += 2
-                continue
-            cursor += 1
-            continue
-
-        if char in " \t":
-            break
-
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            if depth == 0:
-                return False, ""
-            depth -= 1
-
-        cursor += 1
-
-    if cursor == 0 or depth != 0:
-        return False, ""
-
-    return True, text[cursor:].strip(" \t")
-
-
-def _reference_destination_parts(line: str) -> tuple[bool, str]:
-    """Return (valid destination, remaining title text)."""
-    leading = len(line) - len(line.lstrip(" "))
-    if leading > 3:
-        return False, ""
-
-    stripped = line[leading:].strip(" \t")
-    if not stripped:
-        return False, ""
-
-    return _split_reference_destination(stripped)
-
-def _line_starts_reference_block(line: str) -> bool:
-    if not line.strip(" \t"):
-        return True
-
-    if ATX_HEADING_RE.match(line):
-        return True
-
-    if THEMATIC_BREAK_RE.match(line):
-        return True
-
-    if _fence_open(line, paragraph_open=False) is not None:
-        return True
-
-    if re.match(r"^ {0,3}>", line):
-        return True
-
-    if _list_match(line) is not None:
-        return True
-
-    # Type-7 generic tags cannot interrupt a paragraph/reference definition.
-    if _raw_html_block_start(line, allow_generic=False) is not None:
-        return True
-
-    if line.startswith("    "):
-        return True
-
-    return False
-
-
-def _reference_definition_end(
-    lines: tuple[str, ...], start: int
-) -> int | None:
-    """Return the first line after a complete link-reference definition."""
-    remainder = _link_reference_remainder(lines[start])
-    if remainder is None:
-        return None
-
-    cursor = start + 1
-
-    if remainder:
-        valid, title_text = _split_reference_destination(remainder)
-        if not valid:
-            return None
-        if title_text:
-            return _reference_title_end_from_initial(
-                title_text, lines, cursor
-            )
-    else:
-        if cursor >= len(lines):
-            return None
-        if _line_starts_reference_block(lines[cursor]):
-            return None
-
-        valid, title_text = _reference_destination_parts(lines[cursor])
-        if not valid:
-            return None
-        cursor += 1
-
-        if title_text:
-            return _reference_title_end_from_initial(
-                title_text, lines, cursor
-            )
-
-    if cursor < len(lines):
-        title_end = _reference_title_end(lines, cursor)
-        if title_end is not None:
-            return title_end
-
-    return cursor
-
-def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
-    """Approximate rendered prose while excluding non-rendered metadata/code."""
-    lines = markdown_visible_lines(text)
-    rendered: list[str] = []
-    paragraph_open = False
-    paragraph_quote_depth = 0
-    list_content_column: int | None = None
-    index = 0
-
-    while index < len(lines):
-        line = lines[index]
-
-        if not line.strip(" \t"):
-            rendered.append(line)
-            paragraph_open = False
-            list_content_column = None
-            index += 1
-            continue
-
-        quote_state = _strip_quote_prefixes(line)
-        assert quote_state is not None
-        quote_depth, indentation_line = quote_state
-
-        if quote_depth > paragraph_quote_depth:
-            paragraph_open = False
-            list_content_column = None
-        elif (
-            quote_depth < paragraph_quote_depth
-            and _line_interrupts_inline_block(indentation_line)
-        ):
-            paragraph_open = False
-            list_content_column = None
-
-        leading_columns = _leading_columns(indentation_line)
-
-        if (
-            list_content_column is not None
-            and leading_columns >= list_content_column
-        ):
-            nested_context = _list_item_context(
-                line, paragraph_open=paragraph_open
-            )
-            if (
-                nested_context is not None
-                and nested_context[0] > list_content_column
-            ):
-                reference_end = _list_reference_definition_end(lines, index)
-                if reference_end is not None:
-                    index = reference_end
-                    list_content_column = nested_context[0]
-                    paragraph_open = False
-                    continue
-
-                rendered.append(line)
-                list_content_column = nested_context[0]
-                paragraph_open = _list_item_starts_paragraph(line)
-                index += 1
-                continue
-
-            relative_indent = leading_columns - list_content_column
-            if not paragraph_open and relative_indent >= 4:
-                index += 1
-                continue
-
-            rendered.append(line)
-            if not paragraph_open:
-                paragraph_open = _line_starts_paragraph_block(
-                    indentation_line.lstrip(" \t")
-                )
-            if paragraph_open:
-                paragraph_quote_depth = quote_depth
-            index += 1
-            continue
-
-        if list_content_column is not None and leading_columns < list_content_column:
-            list_content_column = None
-            # Preserve an open paragraph: a dedented line may be a lazy
-            # continuation and reference definitions cannot interrupt it.
-
-        if not paragraph_open and leading_columns >= 4:
-            index += 1
-            while index < len(lines):
-                continuation = lines[index]
-                continuation_quote = _strip_quote_prefixes(
-                    continuation
-                )
-                assert continuation_quote is not None
-                _continuation_depth, continuation_line = (
-                    continuation_quote
-                )
-                if not continuation_line.strip(" \t"):
-                    index += 1
-                    continue
-                if _leading_columns(continuation_line) >= 4:
-                    index += 1
-                    continue
-                break
-            paragraph_open = False
-            continue
-
-        if not paragraph_open:
-            definition_end = _reference_definition_end(lines, index)
-            if definition_end is not None:
-                index = definition_end
-                paragraph_open = False
-                list_content_column = None
-                continue
-
-        content_column = _list_content_column(
-            line, paragraph_open=paragraph_open
-        )
-        if content_column is not None:
-            reference_end = _list_reference_definition_end(lines, index)
-            if reference_end is not None:
-                index = reference_end
-                list_content_column = content_column
-                paragraph_open = False
-                continue
-
-            context = _list_item_context(
-                line, paragraph_open=paragraph_open
-            )
-            if (
-                context is not None
-                and not paragraph_open
-                and _leading_columns(context[1]) >= 4
-            ):
-                list_content_column = content_column
-                paragraph_open = False
-                list_paragraph_column = None
-                list_paragraph_quote_depth = 0
-                list_paragraph_allows_lazy_dedent = False
-                index += 1
-                continue
-
-            rendered.append(line)
-            list_content_column = content_column
-            paragraph_open = _list_item_starts_paragraph(line)
-        else:
-            rendered.append(line)
-            paragraph_open = _paragraph_state_after(
-                indentation_line, paragraph_open
-            )
-            paragraph_quote_depth = (
-                quote_depth if paragraph_open else 0
-            )
-
-        index += 1
-
-    return tuple(rendered)
-
-def _inline_link_target_valid(target: str) -> bool:
-    cursor = 0
-    while cursor < len(target) and target[cursor] in " \t\n":
-        cursor += 1
-
-    if cursor == len(target):
-        return True
-
-    if target[cursor] == "<":
-        end = cursor + 1
-        while end < len(target):
-            char = target[end]
-            if char == "\n":
-                return False
-            if char == ">" and not _is_escaped(target, end):
-                break
-            if char == "<" and not _is_escaped(target, end):
-                return False
-            end += 1
-
-        if end >= len(target):
-            return False
-        cursor = end + 1
-    else:
-        depth = 0
-        start = cursor
-        while cursor < len(target):
-            char = target[cursor]
-            if char == "\\" and cursor + 1 < len(target):
-                if target[cursor + 1] in string.punctuation:
-                    cursor += 2
-                    continue
-                cursor += 1
-                continue
-            if char in " \t\n":
-                break
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                if depth == 0:
-                    return False
-                depth -= 1
-            cursor += 1
-
-        if cursor == start or depth != 0:
-            return False
-
-    if cursor == len(target):
-        return True
-
-    if target[cursor] not in " \t\n":
-        return False
-
-    while cursor < len(target) and target[cursor] in " \t\n":
-        cursor += 1
-    if cursor == len(target):
-        return True
-
-    title_lines = _markdown_lines(target[cursor:])
-    if not title_lines:
-        return False
-
-    title_end = _reference_title_end_from_initial(
-        title_lines[0],
-        title_lines,
-        1,
-    )
-    return title_end == len(title_lines)
-
-
-def _matching_inline_link_end(text: str, open_index: int) -> int | None:
-    depth = 0
-    quote: str | None = None
-    cursor = open_index
-
-    while cursor < len(text):
-        char = text[cursor]
-
-        if char == "\\" and cursor + 1 < len(text):
-            cursor += 2
-            continue
-
-        if quote is not None:
-            if char == quote:
-                quote = None
-            cursor += 1
-            continue
-
-        if char in ('"', "'"):
-            quote = char
-            cursor += 1
-            continue
-
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                end = cursor + 1
-                if _inline_link_target_valid(
-                    text[open_index + 1 : cursor]
-                ):
-                    return end
-                return None
-
-        cursor += 1
-
-    return None
-
-
-def _find_unescaped_closing_bracket(
-    text: str, start: int
-) -> int | None:
-    cursor = start
-    while cursor < len(text):
-        if (
-            text[cursor] == "]"
-            and not _is_escaped(text, cursor)
-        ):
-            return cursor
-        cursor += 1
-    return None
-
-
-def _normalize_reference_label(label: str) -> str:
-    return " ".join(label.split()).casefold()
-
-
-def _reference_label_key(line: str) -> str | None:
-    leading = len(line) - len(line.lstrip(" "))
-    if leading > 3:
-        return None
-
-    stripped = line[leading:]
-    if not stripped.startswith("["):
-        return None
-
-    cursor = 1
-    while cursor + 1 < len(stripped):
-        char = stripped[cursor]
-        if char == "[" and not _is_escaped(stripped, cursor):
-            return None
-        if char == "]" and not _is_escaped(stripped, cursor):
-            if stripped[cursor + 1] != ":":
-                return None
-            label = stripped[1:cursor]
-            if not label.strip() or len(label) > 999:
-                return None
-            return _normalize_reference_label(label)
-        cursor += 1
-
-    return None
-
-
-def _defined_reference_labels(text: str) -> set[str]:
-    normalized_text = _normalize_markdown_line_endings(text)
-    lines = _markdown_lines(normalized_text)
-    code_safe_lines = _mask_code_spans(normalized_text)
-    labels: set[str] = set()
-    paragraph_open = False
-    fence_char: str | None = None
-    fence_len = 0
-    fence_column = 0
-    fence_signature: tuple[str, ...] = ()
-    in_html_comment = False
-    raw_html_mode: str | None = None
-    raw_html_terminator: str | None = None
-    raw_html_column = 0
-    raw_html_signature: tuple[str, ...] = ()
-    index = 0
-
-    while index < len(lines):
-        line = lines[index]
-
-        if fence_char is not None:
-            block_line = _container_scoped_content(
-                line, fence_column, fence_signature
-            )
-            if (
-                fence_signature
-                and block_line is None
-                and (
-                    line.strip(" \t")
-                    or "quote" in fence_signature
-                )
-            ):
-                fence_char = None
-                fence_len = 0
-                fence_column = 0
-                fence_signature = ()
-                paragraph_open = False
-            else:
-                if block_line is None:
-                    block_line = line
-                if _fence_close(
-                    block_line, fence_char, fence_len, 0
-                ):
-                    fence_char = None
-                    fence_len = 0
-                    fence_column = 0
-                    fence_signature = ()
-                    paragraph_open = False
-                index += 1
-                continue
-
-        code_safe_line = code_safe_lines[index]
-
-        if raw_html_mode is not None:
-            block_line = _raw_html_container_content(
-                code_safe_line,
-                raw_html_column,
-                raw_html_signature,
-            )
-            if (
-                raw_html_signature
-                and block_line is None
-                and (
-                    line.strip(" \t")
-                    or "quote" in raw_html_signature
-                )
-            ):
-                raw_html_mode = None
-                raw_html_terminator = None
-                raw_html_column = 0
-                raw_html_signature = ()
-                paragraph_open = False
-            else:
-                if block_line is None:
-                    block_line = code_safe_line
-                if _raw_html_block_ends(
-                    block_line,
-                    raw_html_mode,
-                    raw_html_terminator,
-                ):
-                    raw_html_mode = None
-                    raw_html_terminator = None
-                    raw_html_column = 0
-                    raw_html_signature = ()
-                    paragraph_open = False
-                index += 1
-                continue
-
-        visible_line, next_comment_state = _mask_html_comments(
-            code_safe_line, in_html_comment
-        )
-        if in_html_comment or next_comment_state:
-            in_html_comment = next_comment_state
-            paragraph_open = False
-            index += 1
-            continue
-
-        if not line.strip(" \t"):
-            paragraph_open = False
-            index += 1
-            continue
-
-        (
-            html_column,
-            html_content,
-            html_paragraph_open,
-            html_signature,
-        ) = _container_content_identity(
-            visible_line, paragraph_open=paragraph_open
-        )
-        raw_html = _raw_html_block_start(
-            html_content,
-            allow_generic=not html_paragraph_open,
-        )
-        if raw_html is not None:
-            mode, terminator = raw_html
-            if not _raw_html_block_ends(
-                html_content, mode, terminator
-            ):
-                raw_html_mode = mode
-                raw_html_terminator = terminator
-                raw_html_column = html_column
-                raw_html_signature = html_signature
-            paragraph_open = False
-            index += 1
-            continue
-
-        fence = _fence_open_details(
-            line, paragraph_open=paragraph_open
-        )
-        if fence is not None:
-            marker, fence_column, fence_signature = fence
-            fence_char = marker[0]
-            fence_len = len(marker)
-            paragraph_open = False
-            index += 1
-            continue
-
-        if not paragraph_open:
-            visible_lines = list(lines)
-            visible_lines[index] = visible_line
-            definition_end = _container_reference_definition_end(
-                tuple(visible_lines), index, paragraph_open=False
-            )
-            if definition_end is not None:
-                _column, content = _container_content(visible_line)
-                label = _reference_label_key(content)
-                if label is not None:
-                    labels.add(label)
-                index = definition_end
-                continue
-
-        paragraph_open = _paragraph_state_after(
-            line, paragraph_open
-        )
-        index += 1
-
-    return labels
-
-
-def _inline_html_tag_end(text: str, start: int) -> int | None:
-    if start >= len(text) or text[start] != "<":
-        return None
-
-    quote: str | None = None
-    cursor = start + 1
-
-    while cursor < len(text):
-        char = text[cursor]
-        if quote is not None:
-            if char == quote:
-                quote = None
-            cursor += 1
-            continue
-
-        if char in ('"', "'"):
-            quote = char
-            cursor += 1
-            continue
-
-        if char == ">":
-            candidate = text[start : cursor + 1]
-            if (
-                RAW_HTML_GENERIC_OPEN_TAG_RE.fullmatch(candidate)
-                or RAW_HTML_GENERIC_CLOSE_TAG_RE.fullmatch(candidate)
-            ):
-                return cursor + 1
-            return None
-
-        cursor += 1
-
-    return None
-
-
-def _normalize_rendered_visible_text(text: str) -> str:
-    text = html.unescape(text)
-
-    previous = None
-    while previous != text:
-        previous = text
-        text = re.sub(
-            r"(?<!\\)(\*\*|__)(?=\S)(.+?)(?<=\S)\1",
-            r"\2",
-            text,
-        )
-        text = re.sub(
-            r"(?<!\\)(\*|_)(?=\S)(.+?)(?<=\S)\1",
-            r"\2",
-            text,
-        )
-
-    return text
-
-
-def _render_inline_prose(
-    text: str,
-    defined_reference_labels: set[str] | None = None,
-) -> str:
-    """Approximate rendered inline text, excluding link metadata/titles."""
-    rendered: list[str] = []
-    cursor = 0
-    if defined_reference_labels is None:
-        defined_reference_labels = set()
-
-    while cursor < len(text):
-        if (
-            text[cursor] == "\\"
-            and cursor + 1 < len(text)
-            and text[cursor + 1] in string.punctuation
-        ):
-            rendered.append(text[cursor + 1])
-            cursor += 2
-            continue
-
-        if (
-            text[cursor] == "<"
-            and not _is_escaped(text, cursor)
-        ):
-            html_end = _inline_html_tag_end(text, cursor)
-            if html_end is not None:
-                cursor = html_end
-                continue
-
-        label_start = cursor
-        image = False
-        if text.startswith("![", cursor):
-            image = True
-            label_start = cursor + 1
-
-        if text[label_start:label_start + 1] == "[":
-            close = label_start + 1
-            while close < len(text):
-                if (
-                    text[close] == "]"
-                    and not _is_escaped(text, close)
-                ):
-                    break
-                close += 1
-
-            if close < len(text):
-                label = text[label_start + 1 : close]
-                if close + 1 < len(text) and text[close + 1] == "(":
-                    link_end = _matching_inline_link_end(
-                        text, close + 1
-                    )
-                    if link_end is not None:
-                        rendered.append(
-                            _render_inline_prose(
-                                label,
-                                defined_reference_labels,
-                            )
-                        )
-                        cursor = link_end
-                        continue
-
-                if close + 1 < len(text) and text[close + 1] == "[":
-                    ref_close = _find_unescaped_closing_bracket(
-                        text, close + 2
-                    )
-                    if ref_close is not None:
-                        reference_label = text[
-                            close + 2 : ref_close
-                        ]
-                        if not reference_label:
-                            reference_label = label
-                        if (
-                            len(reference_label) <= 999
-                            and _normalize_reference_label(
-                                reference_label
-                            )
-                            in defined_reference_labels
-                        ):
-                            rendered.append(
-                                _render_inline_prose(
-                                    label,
-                                    defined_reference_labels,
-                                )
-                            )
-                            cursor = ref_close + 1
-                            continue
-
-        rendered.append(text[cursor])
-        cursor += 1
-
-    return _normalize_rendered_visible_text(
-        "".join(rendered)
-    )
-
-
-def _render_prose_block(
-    parts: list[str],
-    defined_reference_labels: set[str],
-) -> str:
-    if not parts:
-        return ""
-
-    rendered = _render_inline_prose(
-        "\n".join(parts),
-        defined_reference_labels,
-    )
-    return rendered.replace("\n", " ")
+    return tuple(h for h in markdown_level2_headings(text)
+                 if INVARIANT_HEADING_RE.fullmatch(h))
 
 
 def markdown_rendered_prose_text(text: str) -> str:
-    lines = markdown_rendered_prose_lines(text)
-    defined_reference_labels = _defined_reference_labels(text)
-    blocks: list[str] = []
-    current: list[str] = []
-    current_quote_depth: int | None = None
+    return "\n".join(block.text for block in parse_document(text).prose)
 
-    for line in lines:
-        quote_state = _strip_quote_prefixes(line)
-        assert quote_state is not None
-        quote_depth, quote_content = quote_state
-
-        if not quote_content.strip(" \t"):
-            rendered_block = _render_prose_block(
-                current, defined_reference_labels
-            )
-            if rendered_block:
-                blocks.append(rendered_block)
-            current = []
-            current_quote_depth = None
-            continue
-
-        starts_block = _line_interrupts_inline_block(
-            quote_content
-        )
-
-        effective_quote_depth = quote_depth
-        if (
-            current
-            and current_quote_depth is not None
-            and quote_depth != current_quote_depth
-        ):
-            lazy_quote_continuation = (
-                quote_depth < current_quote_depth
-                and not starts_block
-            )
-            if lazy_quote_continuation:
-                effective_quote_depth = current_quote_depth
-            else:
-                rendered_block = _render_prose_block(
-                    current, defined_reference_labels
-                )
-                if rendered_block:
-                    blocks.append(rendered_block)
-                current = []
-
-        paragraph_continuation = bool(current) and not starts_block
-        _container_column, content = _container_content(
-            quote_content,
-            paragraph_open=paragraph_continuation,
-        )
-
-        single_line_block = (
-            ATX_HEADING_RE.match(content) is not None
-            or THEMATIC_BREAK_RE.match(content) is not None
-        )
-
-        if starts_block and current:
-            rendered_block = _render_prose_block(
-                current, defined_reference_labels
-            )
-            if rendered_block:
-                blocks.append(rendered_block)
-            current = []
-
-        content = content.strip(" \t")
-        if content:
-            current.append(content)
-            current_quote_depth = effective_quote_depth
-
-        if single_line_block and current:
-            rendered_block = _render_prose_block(
-                current, defined_reference_labels
-            )
-            if rendered_block:
-                blocks.append(rendered_block)
-            current = []
-            current_quote_depth = None
-
-    rendered_block = _render_prose_block(
-        current, defined_reference_labels
-    )
-    if rendered_block:
-        blocks.append(rendered_block)
-
-    return "\n".join(blocks)
 
 def validate_texts(texts: dict[str, str]) -> list[str]:
     errors: list[str] = []
@@ -2329,14 +811,20 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
         errors.extend(f"missing required file: {relative}" for relative in missing)
         return errors
 
-    observed_hypotheses = hypothesis_headings(texts["HYPOTHESES.md"])
+    documents = {name: parse_document(texts[name]) for name in REQUIRED_FILES}
+    observed_hypotheses = tuple(
+        heading.title for heading in documents["HYPOTHESES.md"].headings
+        if HYPOTHESIS_HEADING_RE.fullmatch(heading.title)
+    )
     if observed_hypotheses != HYPOTHESES:
         errors.append(
             "hypothesis headings must exactly match the Phase 0 contract "
             f"(expected {HYPOTHESES!r}, observed {observed_hypotheses!r})"
+            f"; HYPOTHESES.md headings at lines "
+            + ", ".join(str(h.line) for h in documents["HYPOTHESES.md"].headings)
         )
 
-    observed_terms = terminology_headings(texts["TERMINOLOGY.md"])
+    observed_terms = tuple(h.title for h in documents["TERMINOLOGY.md"].headings)
     if observed_terms != TERMS:
         for term in TERMS:
             if term not in observed_terms:
@@ -2370,24 +858,33 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
                 f"(expected {TERMS!r}, observed {observed_terms!r})"
             )
 
-    observed_invariants = invariant_headings(texts["INVARIANTS.md"])
+    observed_invariants = tuple(
+        heading.title for heading in documents["INVARIANTS.md"].headings
+        if INVARIANT_HEADING_RE.fullmatch(heading.title)
+    )
     if observed_invariants != INVARIANTS:
         errors.append(
             "invariant headings must exactly match the Phase 0 contract "
             f"(expected {INVARIANTS!r}, observed {observed_invariants!r})"
+            f"; INVARIANTS.md headings at lines "
+            + ", ".join(str(h.line) for h in documents["INVARIANTS.md"].headings)
         )
 
-    roadmap_headings = markdown_level2_headings(texts["ROADMAP.md"])
+    roadmap_headings = tuple(h.title for h in documents["ROADMAP.md"].headings)
     phase0_heading = "Phase 0 — Foundational Research Contract"
     if roadmap_headings.count(phase0_heading) != 1:
         errors.append("roadmap does not define exactly one Phase 0 foundational contract")
 
-    roadmap_prose = markdown_rendered_prose_text(texts["ROADMAP.md"])
-    if "machine-checkable Phase 0 validator" not in roadmap_prose:
+    if not any(
+        "machine-checkable Phase 0 validator" in block.text
+        for block in documents["ROADMAP.md"].prose
+    ):
         errors.append("roadmap does not require Phase 0 validator")
 
-    readme_prose = markdown_rendered_prose_text(texts["README.md"])
-    if "The thesis is not treated as established fact" not in readme_prose:
+    if not any(
+        "The thesis is not treated as established fact" in prose.text
+        for prose in documents["README.md"].prose
+    ):
         errors.append("README must explicitly separate thesis from established fact")
 
     for path, text in texts.items():

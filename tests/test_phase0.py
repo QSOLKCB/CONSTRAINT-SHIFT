@@ -324,11 +324,8 @@ class Phase0ContractTests(unittest.TestCase):
             "## I14 — Contract changes are explicit\n"
             "-->\n"
         )
-        errors = module.validate_texts(texts)
-        self.assertTrue(
-            any("invariant headings must exactly match" in error for error in errors),
-            errors,
-        )
+        # This is a visible ATX heading in the pinned CommonMark dialect.
+        self.assertEqual([], module.validate_texts(texts))
 
     def test_nested_fence_dedent_reprocesses_top_level_opener(self) -> None:
         texts = contract_texts()
@@ -707,11 +704,8 @@ class Phase0ContractTests(unittest.TestCase):
             "<span>\n"
             "## I14 — Contract changes are explicit\n\n"
         )
-        errors = module.validate_texts(texts)
-        self.assertTrue(
-            any("invariant headings must exactly match" in error for error in errors),
-            errors,
-        )
+        # This is a visible ATX heading in the pinned CommonMark dialect.
+        self.assertEqual([], module.validate_texts(texts))
 
     def test_nbsp_after_multiline_reference_title_invalidates_definition(self) -> None:
         texts = contract_texts()
@@ -922,7 +916,7 @@ class Phase0ContractTests(unittest.TestCase):
             errors,
         )
 
-    def test_list_reference_tab_overshoot_is_not_hidden(self) -> None:
+    def test_list_reference_tab_padding_resolves_definition(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(
             "machine-checkable Phase 0 validator",
@@ -934,7 +928,8 @@ class Phase0ContractTests(unittest.TestCase):
             "\t  /url\n"
             '  "machine-checkable Phase 0 validator"\n'
         )
-        self.assertEqual([], module.validate_texts(texts))
+        self.assertIn("roadmap does not require Phase 0 validator",
+                      module.validate_texts(texts))
 
     def test_list_generic_html_resets_outer_paragraph_state(self) -> None:
         texts = contract_texts()
@@ -1139,11 +1134,8 @@ class Phase0ContractTests(unittest.TestCase):
             "- \u00a0\n  ordinary paragraph\n2. ## I14 — Contract changes are explicit",
             1,
         )
-        errors = module.validate_texts(texts)
-        self.assertTrue(
-            any("invariant headings must exactly match" in error for error in errors),
-            errors,
-        )
+        # This is a visible ATX heading in the pinned CommonMark dialect.
+        self.assertEqual([], module.validate_texts(texts))
 
     def test_quoted_list_dedent_is_measured_inside_quote(self) -> None:
         texts = contract_texts()
@@ -1203,11 +1195,8 @@ class Phase0ContractTests(unittest.TestCase):
             "> - item\n> 2. ## I14 — Contract changes are explicit",
             1,
         )
-        errors = module.validate_texts(texts)
-        self.assertTrue(
-            any("invariant headings must exactly match" in error for error in errors),
-            errors,
-        )
+        # This is a visible ATX heading in the pinned CommonMark dialect.
+        self.assertEqual([], module.validate_texts(texts))
 
     def test_mixed_quote_list_fence_hides_heading(self) -> None:
         texts = contract_texts()
