@@ -526,6 +526,138 @@ class MarkdownParserRegressionMatrix(unittest.TestCase):
             module.markdown_level2_headings(markdown),
         )
 
+    def test_nested_quote_marker_after_tab_is_visible(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        self.assertIn(
+            heading,
+            module.markdown_level2_headings(
+                f"> \t> ## {heading}"
+            ),
+        )
+
+    def test_reference_use_label_length_boundary(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        definition = f"[{required}]: /url"
+
+        valid_use = (" " * (999 - len(required))) + required
+        invalid_use = (" " * 1000) + required
+
+        valid = module.markdown_rendered_prose_text(
+            f"[visible][{valid_use}]\n\n{definition}"
+        )
+        invalid = module.markdown_rendered_prose_text(
+            f"[visible][{invalid_use}]\n\n{definition}"
+        )
+        self.assertNotIn(required, valid)
+        self.assertIn(required, invalid)
+
+    def test_link_text_decodes_markdown_escape(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "[machine\\-checkable Phase 0 validator](/url)"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_invalid_multiline_inline_link_remains_literal(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "[visible](/url machine-checkable Phase 0\n"
+            "validator)"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_lazily_opened_quoted_code_span_is_hidden(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> prefix\n"
+            "`machine-checkable Phase 0\n"
+            "> validator`"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_inline_comment_survives_lazy_quote_continuation(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "> visible <!--\n"
+            "machine-checkable Phase 0 validator -->"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_reference_definition_after_html_closer_resolves(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        prose = module.markdown_rendered_prose_text(
+            f"[visible][{required}]\n\n"
+            "<pre>\nstuff\n</pre>\n"
+            f"[{required}]: /url"
+        )
+        self.assertNotIn(required, prose)
+
+    def test_same_shape_sibling_blocks_do_not_own_each_other(self) -> None:
+        heading = "I14 — Contract changes are explicit"
+        for opener in ("~~~", "<div>", "<!--"):
+            with self.subTest(opener=opener):
+                markdown = f"- {opener}\n- ## {heading}\n"
+                self.assertIn(
+                    heading,
+                    module.markdown_level2_headings(markdown),
+                )
+
+    def test_backslash_before_code_span_closer_is_literal_code(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "`machine-checkable Phase 0 validator\\`"
+        )
+        self.assertNotIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_malformed_link_destination_remains_visible(self) -> None:
+        prose = module.markdown_rendered_prose_text(
+            "[visible](machine-checkable Phase 0 validator)"
+        )
+        self.assertIn(
+            "machine-checkable Phase 0 validator",
+            prose,
+        )
+
+    def test_rendered_entities_and_emphasis_are_normalized(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        self.assertIn(
+            required,
+            module.markdown_rendered_prose_text(
+                "machine&#45;checkable Phase 0 validator"
+            ),
+        )
+        self.assertIn(
+            required,
+            module.markdown_rendered_prose_text(
+                "**machine-checkable** Phase 0 validator"
+            ),
+        )
+
+    def test_hidden_reference_definitions_do_not_resolve(self) -> None:
+        required = "machine-checkable Phase 0 validator"
+        for opener, closer in (
+            ("<pre>", "</pre>"),
+            ("<!--", "-->"),
+        ):
+            with self.subTest(opener=opener):
+                prose = module.markdown_rendered_prose_text(
+                    f"[visible][{required}]\n\n"
+                    f"{opener}\n\n"
+                    f"[{required}]: /url\n"
+                    f"{closer}\n"
+                )
+                self.assertIn(required, prose)
+
     def test_list_reference_tab_overshoot_stays_visible(self) -> None:
         texts = contract_texts()
         texts["ROADMAP.md"] = texts["ROADMAP.md"].replace(

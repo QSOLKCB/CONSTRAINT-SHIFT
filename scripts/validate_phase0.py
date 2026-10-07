@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import html
 import re
 import string
 import sys
@@ -297,14 +298,27 @@ def _strip_columns_prefix(
 def _quote_marker_content(
     line: str, initial_column: int = 0
 ) -> tuple[int, str] | None:
-    match = re.match(r"^ {0,3}>", line)
-    if match is None:
+    column = initial_column
+    index = 0
+
+    while index < len(line) and line[index] in " \t":
+        char = line[index]
+        if char == " ":
+            next_column = column + 1
+        else:
+            next_column = column + 4 - (column % 4)
+
+        if next_column - initial_column > 3:
+            break
+
+        column = next_column
+        index += 1
+
+    if index >= len(line) or line[index] != ">":
         return None
 
-    marker_column = _column_at(
-        line, match.end(), initial_column=initial_column
-    )
-    remainder = line[match.end() :]
+    marker_column = column + 1
+    remainder = line[index + 1 :]
 
     if remainder.startswith((" ", "\t")):
         content = _strip_columns_prefix(
@@ -421,6 +435,8 @@ def _container_scoped_content(
 
     if structural_signature:
         if structural_signature == container_signature:
+            if "list" in structural_signature:
+                return None
             return structural_content
 
         # A mixed container may repeat its explicit quote prefix while
@@ -687,13 +703,50 @@ def _line_interrupts_inline_block(line: str) -> bool:
     return raw_html is not None
 
 
+def _inline_opener_quote_depth(
+    text: str, opener_start: int
+) -> int:
+    line_start = text.rfind("\n", 0, opener_start) + 1
+    prefix = text[line_start:opener_start]
+    quote_state = _strip_quote_prefixes(prefix)
+    assert quote_state is not None
+    quote_depth, _content = quote_state
+    if quote_depth:
+        return quote_depth
+
+    cursor = line_start - 1
+    while cursor >= 0:
+        previous_start = text.rfind("\n", 0, cursor) + 1
+        previous = text[previous_start:cursor]
+
+        if not previous.strip(" \t"):
+            return 0
+
+        previous_quote = _strip_quote_prefixes(previous)
+        assert previous_quote is not None
+        previous_depth, previous_content = previous_quote
+        if previous_depth:
+            if (
+                _line_starts_paragraph_block(previous_content)
+                or not _line_interrupts_inline_block(previous_content)
+            ):
+                return previous_depth
+            return 0
+
+        if _line_interrupts_inline_block(previous):
+            return 0
+
+        cursor = previous_start - 1
+
+    return 0
+
+
 def _inline_block_end(
     text: str, opener_start: int, opener_end: int
 ) -> int:
-    opener_prefix = _line_prefix(text, opener_start)
-    quote_state = _strip_quote_prefixes(opener_prefix)
-    assert quote_state is not None
-    opener_quote_depth, _opener_content = quote_state
+    opener_quote_depth = _inline_opener_quote_depth(
+        text, opener_start
+    )
 
     cursor = text.find("\n", opener_end)
     if cursor == -1:
@@ -737,10 +790,6 @@ def _matching_code_span_end(
         tick = text.find("`", cursor, limit)
         if tick == -1:
             return None
-
-        if _is_escaped(text, tick):
-            cursor = tick + 1
-            continue
 
         run_end = _backtick_run_end(text, tick)
         candidate_length = run_end - tick
@@ -943,6 +992,7 @@ def _markdown_visible_records(
     in_html_comment = False
     comment_container_column = 0
     comment_container_signature: tuple[str, ...] = ()
+    comment_allows_lazy_continuation = False
     raw_html_mode: str | None = None
     raw_html_terminator: str | None = None
     raw_html_container_column = 0
@@ -1071,8 +1121,16 @@ def _markdown_visible_records(
                 comment_container_column,
                 comment_container_signature,
             )
+            lazy_comment_continuation = (
+                scoped is None
+                and comment_allows_lazy_continuation
+                and "quote" in comment_container_signature
+                and bool(raw_line.strip(" \t"))
+                and not _line_interrupts_inline_block(raw_line)
+            )
             if (
                 scoped is None
+                and not lazy_comment_continuation
                 and (
                     raw_line.strip(" \t")
                     or "quote" in comment_container_signature
@@ -1081,6 +1139,7 @@ def _markdown_visible_records(
                 in_html_comment = False
                 comment_container_column = 0
                 comment_container_signature = ()
+                comment_allows_lazy_continuation = False
                 paragraph_open = False
 
         if not in_html_comment:
@@ -1114,6 +1173,13 @@ def _markdown_visible_records(
             ) = _container_content_identity(
                 raw_line, paragraph_open=paragraph_open
             )
+            _visible_column, visible_comment_prefix = (
+                _container_content(visible_line)
+            )
+            comment_allows_lazy_continuation = (
+                paragraph_open
+                or bool(visible_comment_prefix.strip(" \t"))
+            )
 
         if in_html_comment:
             records.append(
@@ -1135,6 +1201,7 @@ def _markdown_visible_records(
         if was_in_html_comment and not in_html_comment:
             comment_container_column = 0
             comment_container_signature = ()
+            comment_allows_lazy_continuation = False
 
         if not paragraph_open:
             definition_end = _container_reference_definition_end(
@@ -1690,6 +1757,76 @@ def markdown_rendered_prose_lines(text: str) -> tuple[str, ...]:
 
     return tuple(rendered)
 
+def _inline_link_target_valid(target: str) -> bool:
+    cursor = 0
+    while cursor < len(target) and target[cursor] in " \t\n":
+        cursor += 1
+
+    if cursor == len(target):
+        return True
+
+    if target[cursor] == "<":
+        end = cursor + 1
+        while end < len(target):
+            char = target[end]
+            if char == "\n":
+                return False
+            if char == ">" and not _is_escaped(target, end):
+                break
+            if char == "<" and not _is_escaped(target, end):
+                return False
+            end += 1
+
+        if end >= len(target):
+            return False
+        cursor = end + 1
+    else:
+        depth = 0
+        start = cursor
+        while cursor < len(target):
+            char = target[cursor]
+            if char == "\\" and cursor + 1 < len(target):
+                if target[cursor + 1] in string.punctuation:
+                    cursor += 2
+                    continue
+                cursor += 1
+                continue
+            if char in " \t\n":
+                break
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    return False
+                depth -= 1
+            cursor += 1
+
+        if cursor == start or depth != 0:
+            return False
+
+    if cursor == len(target):
+        return True
+
+    if target[cursor] not in " \t\n":
+        return False
+
+    while cursor < len(target) and target[cursor] in " \t\n":
+        cursor += 1
+    if cursor == len(target):
+        return True
+
+    title_lines = _markdown_lines(target[cursor:])
+    if not title_lines:
+        return False
+
+    title_end = _reference_title_end_from_initial(
+        title_lines[0],
+        title_lines,
+        1,
+    )
+    return title_end == len(title_lines)
+
+
 def _matching_inline_link_end(text: str, open_index: int) -> int | None:
     depth = 0
     quote: str | None = None
@@ -1718,7 +1855,12 @@ def _matching_inline_link_end(text: str, open_index: int) -> int | None:
         elif char == ")":
             depth -= 1
             if depth == 0:
-                return cursor + 1
+                end = cursor + 1
+                if _inline_link_target_valid(
+                    text[open_index + 1 : cursor]
+                ):
+                    return end
+                return None
 
         cursor += 1
 
@@ -1770,13 +1912,20 @@ def _reference_label_key(line: str) -> str | None:
 
 
 def _defined_reference_labels(text: str) -> set[str]:
-    lines = _markdown_lines(text)
+    normalized_text = _normalize_markdown_line_endings(text)
+    lines = _markdown_lines(normalized_text)
+    code_safe_lines = _mask_code_spans(normalized_text)
     labels: set[str] = set()
     paragraph_open = False
     fence_char: str | None = None
     fence_len = 0
     fence_column = 0
     fence_signature: tuple[str, ...] = ()
+    in_html_comment = False
+    raw_html_mode: str | None = None
+    raw_html_terminator: str | None = None
+    raw_html_column = 0
+    raw_html_signature: tuple[str, ...] = ()
     index = 0
 
     while index < len(lines):
@@ -1813,7 +1962,78 @@ def _defined_reference_labels(text: str) -> set[str]:
                 index += 1
                 continue
 
+        code_safe_line = code_safe_lines[index]
+
+        if raw_html_mode is not None:
+            block_line = _raw_html_container_content(
+                code_safe_line,
+                raw_html_column,
+                raw_html_signature,
+            )
+            if (
+                raw_html_signature
+                and block_line is None
+                and (
+                    line.strip(" \t")
+                    or "quote" in raw_html_signature
+                )
+            ):
+                raw_html_mode = None
+                raw_html_terminator = None
+                raw_html_column = 0
+                raw_html_signature = ()
+                paragraph_open = False
+            else:
+                if block_line is None:
+                    block_line = code_safe_line
+                if _raw_html_block_ends(
+                    block_line,
+                    raw_html_mode,
+                    raw_html_terminator,
+                ):
+                    raw_html_mode = None
+                    raw_html_terminator = None
+                    raw_html_column = 0
+                    raw_html_signature = ()
+                    paragraph_open = False
+                index += 1
+                continue
+
+        visible_line, next_comment_state = _mask_html_comments(
+            code_safe_line, in_html_comment
+        )
+        if in_html_comment or next_comment_state:
+            in_html_comment = next_comment_state
+            paragraph_open = False
+            index += 1
+            continue
+
         if not line.strip(" \t"):
+            paragraph_open = False
+            index += 1
+            continue
+
+        (
+            html_column,
+            html_content,
+            html_paragraph_open,
+            html_signature,
+        ) = _container_content_identity(
+            visible_line, paragraph_open=paragraph_open
+        )
+        raw_html = _raw_html_block_start(
+            html_content,
+            allow_generic=not html_paragraph_open,
+        )
+        if raw_html is not None:
+            mode, terminator = raw_html
+            if not _raw_html_block_ends(
+                html_content, mode, terminator
+            ):
+                raw_html_mode = mode
+                raw_html_terminator = terminator
+                raw_html_column = html_column
+                raw_html_signature = html_signature
             paragraph_open = False
             index += 1
             continue
@@ -1830,11 +2050,13 @@ def _defined_reference_labels(text: str) -> set[str]:
             continue
 
         if not paragraph_open:
+            visible_lines = list(lines)
+            visible_lines[index] = visible_line
             definition_end = _container_reference_definition_end(
-                lines, index, paragraph_open=False
+                tuple(visible_lines), index, paragraph_open=False
             )
             if definition_end is not None:
-                _column, content = _container_content(line)
+                _column, content = _container_content(visible_line)
                 label = _reference_label_key(content)
                 if label is not None:
                     labels.add(label)
@@ -1881,6 +2103,26 @@ def _inline_html_tag_end(text: str, start: int) -> int | None:
         cursor += 1
 
     return None
+
+
+def _normalize_rendered_visible_text(text: str) -> str:
+    text = html.unescape(text)
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(
+            r"(?<!\\)(\*\*|__)(?=\S)(.+?)(?<=\S)\1",
+            r"\2",
+            text,
+        )
+        text = re.sub(
+            r"(?<!\\)(\*|_)(?=\S)(.+?)(?<=\S)\1",
+            r"\2",
+            text,
+        )
+
+    return text
 
 
 def _render_inline_prose(
@@ -1935,7 +2177,12 @@ def _render_inline_prose(
                         text, close + 1
                     )
                     if link_end is not None:
-                        rendered.append(label)
+                        rendered.append(
+                            _render_inline_prose(
+                                label,
+                                defined_reference_labels,
+                            )
+                        )
                         cursor = link_end
                         continue
 
@@ -1950,19 +2197,27 @@ def _render_inline_prose(
                         if not reference_label:
                             reference_label = label
                         if (
-                            _normalize_reference_label(
+                            len(reference_label) <= 999
+                            and _normalize_reference_label(
                                 reference_label
                             )
                             in defined_reference_labels
                         ):
-                            rendered.append(label)
+                            rendered.append(
+                                _render_inline_prose(
+                                    label,
+                                    defined_reference_labels,
+                                )
+                            )
                             cursor = ref_close + 1
                             continue
 
         rendered.append(text[cursor])
         cursor += 1
 
-    return "".join(rendered)
+    return _normalize_rendered_visible_text(
+        "".join(rendered)
+    )
 
 
 def _render_prose_block(
@@ -2132,7 +2387,7 @@ def validate_texts(texts: dict[str, str]) -> list[str]:
         errors.append("roadmap does not require Phase 0 validator")
 
     readme_prose = markdown_rendered_prose_text(texts["README.md"])
-    if "The thesis is **not treated as established fact**" not in readme_prose:
+    if "The thesis is not treated as established fact" not in readme_prose:
         errors.append("README must explicitly separate thesis from established fact")
 
     for path, text in texts.items():
