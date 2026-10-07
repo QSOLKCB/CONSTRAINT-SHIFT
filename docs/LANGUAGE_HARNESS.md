@@ -1,0 +1,236 @@
+# Phase 2 — Language Harness
+
+The first harness executes one frozen task contract across C, C++, Rust, Go, and
+Python. It uses the Python standard library and emits infrastructure smoke
+records with physical SHA-256-bound evidence. These reuse the Phase 1 `2.0.0`
+structure under the separate `harness-smoke.schema.json` contract and
+`constraint-shift-harness-smoke` record type, with `hypotheses: []`. The research
+experiment schema remains unchanged. Harness procedure version is `1.1.0`; the task remains `1.0.0` and the record
+schema remains `2.0.0`. These versions identify separate contracts.
+
+## Run
+
+From the repository root, with Python 3.12 or newer on a POSIX host:
+
+```bash
+python3 scripts/language_harness.py list
+python3 scripts/language_harness.py run --languages c cpp python --output evidence/my-run
+python3 scripts/language_harness.py verify evidence/my-run
+```
+
+To run every implemented adapter, omit `--languages`. Every selected language
+is retained, including unavailable toolchains. Use a new output directory for
+each invocation; existing output is rejected without overwriting it. Output
+must resolve inside this repository because schema evidence paths are relative
+to its root. Explicit source/output arguments resolve from the caller's working
+directory, so invocation from an external directory is supported.
+
+To execute alternative implementations of the same task:
+
+```bash
+python3 scripts/language_harness.py run --languages python --sources /path/to/candidates --timeout 5 --output-limit 1048576 --output evidence/candidate-run
+```
+
+`--sources` must contain the same language subdirectories and filenames as the
+reference fixtures. This phase executes supplied code; it does not call an LLM,
+attempt repair, or infer its author's identity. The acting agent in each record
+is the scripted harness. Authoring provenance belongs to a later generation
+protocol rather than an invented model/provider label.
+
+Exit codes: `0` means every selected trial succeeded (or integrity verification
+passed), `1` means at least one retained trial did not succeed (or verification
+found a mismatch), and `2` means a command/configuration/I/O error. An unavailable
+compiler is an invalid retained trial, not a silent omission or a passing skip.
+
+## Equivalent task
+
+[TASK-FOLD-001](../harness/tasks/bounded-integer-fold/TASK.md) accepts a count and
+up to 64 integers bounded to `[-1000, 1000]`. It returns the count, sum, and sum of
+squares. These bounds avoid language-specific overflow requirements.
+
+Eight frozen cases cover empty input, positive and negative values, zeros,
+numeric bounds, mixed values, maximum count, and balanced maximum count. The
+harness checks the case file against a separate integer oracle and a registered
+canonical suite digest before execution. Removing, reordering, renaming, or
+replacing even oracle-correct cases requires a new task/suite version.
+Acceptance requires exact ASCII stdout bytes, empty stderr, and exit status zero.
+Invalid-input behaviour is deliberately outside this task's domain.
+
+| Adapter | Tool | Source | Declared accommodation |
+| --- | --- | --- | --- |
+| `c` | GCC | `c/main.c` | C11, `-O0`, warning diagnostics as errors |
+| `cpp` | G++ | `cpp/main.cpp` | C++17, `-O0`, warning diagnostics as errors |
+| `rust` | rustc | `rust/main.rs` | Edition 2021, optimization level zero |
+| `go` | Go | `go/main.go` | Standard library only, modules/workspaces/CGO disabled |
+| `python` | Harness interpreter | `python/main.py` | Isolated mode; syntax compile without writing bytecode |
+
+There are no third-party candidate dependencies. The compilers' standard
+libraries and runtimes are external toolchain dependencies and are recorded as
+such. TypeScript, Java, Ada, Fortran, and COBOL remain candidates for later
+adapters; they are not reported as implemented or silently substituted.
+
+## Frozen procedure and outcomes
+
+The task, cases, harness, record validator, schema, all selected sources, and analysis rules are
+copied and hashed before any subprocess executes. Candidates compile and run
+from disposable source copies outside the retained snapshots. Mutations of an
+execution copy do not replace the original evidence. In procedure 1.1.0, original
+Python source bytes are also held by the parent before any subprocess and written
+to a unique disposable file for each case. Syntax checking uses a separate build
+copy. A self-rewriting Python candidate cannot change later cases' implementation.
+One version probe and one build are attempted per selected language. Cases run in declared order and stop at the
+first failure; remaining case IDs are retained as `cases_not_run`. There are no
+retries or post-outcome exclusions.
+
+Discovered tool paths are made absolute against the caller's working directory,
+including tools found through relative `PATH` components. A compiled artifact
+is copied into evidence and hashed immediately after a successful build. Each
+case executes a fresh disposable copy from the post-build bytes held by the
+parent harness. Version probes, builds, and cases use disposable working
+directories outside retained evidence directories; a relative write to
+`program` cannot change the retained snapshot. Each case has a unique executable
+path, so a descendant pending termination never forces a later copy to overwrite
+its mapped executable. Execution directories are created on the user-selected
+output filesystem and removed after the run; a system `/tmp` mounted `noexec`
+does not determine where candidates execute. The selected output filesystem
+must permit execution. Missing build artifacts
+or failures preparing execution copies are retained as invalid outcomes.
+
+The default process deadline is 30 seconds, with a shared 1 MiB stdout/stderr
+capture limit per process. A process group is terminated on timeout or output
+overflow, including descendants that keep output pipes open. Output overflow
+is a failure with explicitly truncated retained output. A deadline is a timeout;
+missing tools/sources, unusable version identity, or process-start errors are
+invalid; compiler diagnostics, nonzero exits, stderr, and output mismatches are
+failures. Build acceptance also requires empty stdout/stderr; a zero-exit build
+with diagnostics is a retained failure. Output-limit results are consistently
+`failure` trials and `fail` verification outcomes, including version probes.
+No failed result is deleted merely because later languages succeed. Version identity
+uses the first nonempty stripped stream, checking stdout before stderr; whitespace
+stdout does not hide a useful stderr identity. Both original streams remain retained.
+
+The harness uses controlled locale, timezone, and Go settings. It retains the
+exact execution environment it supplies, including the inherited tool search
+path and home directory. Fresh temporary Go caches are removed after the run.
+OS/kernel/architecture and full observed tool version output are retained.
+Process bounds are not a sandbox: supplied programs execute with the operator's
+permissions. Use an isolated host/container when candidates require isolation.
+
+The subprocess boundary accepts only a nonempty list of string arguments with
+an absolute executable and no NUL bytes. Fixed adapter commands choose a resolved
+tool or the built binary, and `shell=False` keeps each argument literal. Tests
+cover shell metacharacters and rejection of command strings. The single `Popen`
+call carries a rule-specific `nosemgrep` audit annotation for
+`python.lang.security.audit.dangerous-subprocess-use-audit`; dynamic argv is
+necessary for toolchain execution and does not imply shell evaluation. Other
+security rules and subprocess call sites remain scanned.
+
+## Evidence and verification
+
+Each bundle contains `contract/` snapshots, one directory per selected language,
+and `summary.json`. Language directories retain source, available compiled
+binary, version/build/case argv and exit codes, monotonic process durations,
+inputs, expected bytes, actual stdout/stderr bytes, result decisions, and
+`record.json`. Every selected trial has explicit tool identity, build, and
+behavioural verification outcomes, including evidence-backed `not_run` entries.
+
+`verify` checks record schemas, a nonempty unique supported plan selection,
+selected-language retention, adapter/directory identity, agreement between
+record, summary, verification statuses, and retained execution outcome,
+frozen acceptance coverage, and every listed evidence file's SHA-256 and byte count.
+Executed case IDs must be the exact frozen prefix in order, with the exact
+remaining suffix listed as not run; execution must stop at the first rejected
+case. Success requires all frozen cases, and complete accepted coverage must
+be reported as success. Each executed case must bind its
+input, expected output, result envelope, stdout, and stderr files as evidence.
+Each record must bind its execution result, environment, required contract snapshots,
+and the envelope and both streams for every executed version, build, and case stage.
+The harness manifest requires a byte count even though the general record schema
+permits omitting it. Missing counts or malformed result, stage, or summary objects
+produce controlled verification errors.
+
+Verification checks these bindings and hashes before consuming execution evidence.
+Physical stage envelopes must match their aggregate entries, and retained inputs
+and expected bytes must match the frozen suite. Version probes must use the plan's
+selected tool and the adapter's exact probe arguments. Build and case argv must
+match the fixed adapter flags and command, including source/artifact path
+relationships for the declared procedure. Absolute argv paths describe the
+original host; these relationships are checked without requiring deleted
+execution directories or the original absolute checkout root to exist. Procedure 1.1.0 requires an output-local
+build copy and a unique case path for every Python source or compiled executable.
+The record's agent version must equal the plan and summary procedure version;
+changing version labels cannot upgrade a shared-source 1.0.0 execution.
+
+Every declared execution environment setting must be present and match in the
+trial's environment snapshot. The plan settings themselves must match the frozen
+procedure (including C locale, UTC, and controlled Go settings). Inherited PATH,
+optional HOME, and temporary Go cache paths remain retained trial-specific values.
+Record toolchain and platform metadata must agree with the selected tool and plan.
+Exactly one `cases_executed` measurement with unit `count` must equal the retained
+case count, including zero-case invalid trials and partial failed runs. The producer and verifier share
+one procedure that recomputes case acceptance from status, exit code, and raw
+stdout/stderr; checks version → build → cases progression; and derives the exact
+trial status and all three verifier statuses. Each harness verifier ID must appear
+exactly once. A failed build cannot have executed cases, and a wrong-output failure
+cannot be relabeled as timeout. Evidence must resolve within the bundle. Integrity
+verification can succeed for a correctly retained failed trial. It reads retained
+observations without rerunning candidate programs or authenticating the producer;
+custody and signatures are outside Phase 2. Keep the records and their evidence together
+at the recorded repository-relative location.
+
+Historical validation uses the retained schema and validator bytes, rather than
+silently applying current record rules. Both snapshots must match an explicitly
+registered, repository-approved SHA-256 pair before the validator is loaded.
+The checked bytes are compiled directly; unknown bundled code is rejected
+without execution. New contracts must register new identities and preserve the
+old registrations, including the original experiment-record bundle format.
+
+The reader supports harness procedures 1.0.0 and 1.1.0. Internally consistent
+historical 1.0.0 bundles remain valid under their registered record contract;
+contradictory outcomes or incomplete evidence are rejected with a diagnostic.
+Their files and conclusions are not rewritten. Verification of an older bundle
+does not establish the fresh-per-case Python execution guarantee introduced in
+1.1.0. The task's eight cases, canonical suite digest, record schema, and approved
+schema/validator identities are unchanged.
+
+Smoke records have no linked hypothesis IDs and a distinct record type, so a
+hypothesis-based selection cannot treat reference executions as H2 observations.
+
+The acceptance procedure is external to the candidate program; the records
+conservatively set `independent_from_generator` to false because independent
+fixture-author/verifier provenance has not been established.
+
+## CI and reproducibility limits
+
+The Phase 2 workflow runs all five adapters on Ubuntu 24.04 with GCC 13 tools,
+Python 3.12.14, Rust 1.85.0, and Go 1.24.0. Python/Rust/Go release selections are
+fixed; GCC package revision and runner image can change and their observed
+identities are retained. This is source/contract replay support, not a claim of
+bit-identical builds or identical timings on mutable hosted runners. The full
+version logs, flags, platform, and inputs identify the tested conditions.
+
+CI verifies the emitted records and retains the bundle as an Actions artifact
+for 30 days even when execution fails. Download artifacts before that expires
+when a run is intended for longer retention.
+
+```bash
+python3 -m unittest discover -s tests -p "test_phase2*.py" -v
+python3 -m unittest discover -s tests -v
+```
+
+Reference smoke tests exercise adapters available on the current host; the
+dedicated CI invocation explicitly selects all five and fails when any cannot
+run successfully. The suite also tests missing tools/sources, compilation and
+runtime failures, resource limits, descendant cleanup, corrupted evidence,
+output preservation, and caller-relative invocation. `test_phase2_review.py`
+retains all eight supplied a8167c5 review gates and adds outcome relabeling,
+raw-versus-envelope disagreement, missing stage bindings, duplicate verifier IDs,
+missing byte counts, malformed-artifact regressions, procedure-version upgrades,
+altered commands for all five adapters, contradictory environment settings, and
+case-count measurements. The Phase 2 workflow runs
+both harness test files.
+
+Passing these cases demonstrates the harness under the retained conditions.
+It is not a universal equivalence proof, AI performance experiment, language
+ranking, or empirical support for H2. Phase 3 adds the generation/diagnostic
+feedback experiment under a separate frozen protocol.

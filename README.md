@@ -34,6 +34,11 @@ Phase 1 defines how experimental work is retained:
 - [`experiment-record.schema.json`](schema/experiment-record.schema.json) — version `2.0.0` JSON Schema Draft 2020-12 structural contract.
 - [Schema examples](schema/examples/) — successful and explicitly failed trials.
 
+Phase 2 executes equivalent tasks across language adapters:
+
+- [Language harness](docs/LANGUAGE_HARNESS.md) — run instructions, adapters, evidence, and limits.
+- [Frozen integer task](harness/tasks/bounded-integer-fold/TASK.md) — shared observable contract.
+
 The repository intentionally separates **motivation**, **hypothesis**, **measurement**, **evidence**, and **conclusion**.
 
 ## Validation
@@ -90,11 +95,11 @@ supported, weakened, or falsified claim
 
 ## Current status
 
-**Phase 1 — Experiment Schema**
+**Phase 2 — Language Harness**
 
 The repository now has a versioned machine-readable record for tasks, agents, languages, toolchains, environments, trials, interventions, verification outcomes, and retained evidence. No language ranking, legacy-survival claim, modding claim, or social-perception claim is considered established by the schema itself.
 
-Phase 2 will build the first equivalent-task language harness on top of this record contract.
+The first harness supports C, C++, Rust, Go, and Python under one frozen integer task, retaining successful and failed executions as infrastructure smoke records based on the Phase 1 `2.0.0` structure. Their distinct record type and empty hypothesis links keep them separate from research trials. Phase 3 will introduce the compiler-feedback experiment.
 
 ## Scope
 

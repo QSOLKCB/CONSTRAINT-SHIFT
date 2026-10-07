@@ -38,7 +38,21 @@ Deliverables:
 Exit criterion: the Phase 1 validator accepts the retained examples, the failed-trial example remains a valid explicit failure, and the repository test suite passes.
 
 ## Phase 2 — Language Harness
-Build a minimal multi-language harness for equivalent task execution. Initial candidates may include C, C++, Rust, Go, Python, TypeScript, Java, Ada, Fortran, and COBOL where reproducible toolchains are practical.
+
+**Status: implemented by the Phase 2 PR**
+
+Deliverables:
+
+- [x] one frozen bounded-integer task with eight shared acceptance cases;
+- [x] C, C++, Rust, Go, and Python reference adapters;
+- [x] isolated working directories, process-group deadlines, and bounded output capture;
+- [x] source/contract snapshots, observed toolchain identity, and retained raw execution evidence;
+- [x] distinct infrastructure smoke records using the Phase 1 `2.0.0` structure, with no hypothesis observations, for successful, failed, timed-out, and invalid/unavailable trials;
+- [x] physical evidence verification, regression tests, and all-five-adapter CI artifacts.
+
+Exit criterion: the five reference adapters satisfy the same frozen acceptance suite in CI, emitted records and physical evidence verify, and repository tests pass. No hypothesis support is inferred from smoke coverage.
+
+TypeScript, Java, Ada, Fortran, and COBOL remain candidate additions where reproducible toolchains are practical. See [Language harness](docs/LANGUAGE_HARNESS.md) for the implemented scope and replay limits.
 
 ## Phase 3 — Compiler Feedback Experiment
 Test H2 by measuring whether diagnostic and constraint feedback changes agent repair performance.

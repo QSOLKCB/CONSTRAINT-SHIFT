@@ -2,6 +2,12 @@
 
 Phase 1 defines the machine-readable evidence record used by later CONSTRAINT-SHIFT experiments. It records what was attempted and under which frozen contract; it does not turn a trial into a conclusion.
 
+Phase 2 reference smoke executions use the separate `harness-smoke.schema.json`
+contract, which reuses this version `2.0.0` structure with record type
+`constraint-shift-harness-smoke` and an exactly empty `hypotheses` array. They are
+infrastructure records, not hypothesis observations. The experiment schema and
+its required hypothesis links are unchanged.
+
 ## Files
 
 - `schema/experiment-record.schema.json` — JSON Schema Draft 2020-12 structural contract.
